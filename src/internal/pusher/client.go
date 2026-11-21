@@ -64,6 +64,9 @@ func NewClient(cfg *Config) (*PusherClient, error) {
 		Secure: cfg.Scheme != "http",
 		HTTPClient: &http.Client{
 			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+			},
 		},
 	}
 

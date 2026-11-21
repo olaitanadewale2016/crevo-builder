@@ -200,25 +200,22 @@ func (s *Server) handleRun(c *gin.Context) {
 
 			pusherClient, err := pusher.NewClient(pusherConfig)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Invalid Pusher config: " + err.Error()})
-				return
+				s.logger.Warnf("Invalid Pusher config for session %s: %v, falling back to webhook-only", sessionID, err)
+				session = agent.NewSession(sessionID, req.WorkspaceID, workspacePath, req.WebhookURL, s.serverKey, &req.Config)
+			} else if err := pusherClient.ValidateCredentials(); err != nil {
+				s.logger.Warnf("Pusher validation failed for session %s: %v, falling back to webhook-only", sessionID, err)
+				session = agent.NewSession(sessionID, req.WorkspaceID, workspacePath, req.WebhookURL, s.serverKey, &req.Config)
+			} else {
+				// Create webhook notifier for critical events (status, complete, error)
+				webhookNotifier := webhook.NewNotifier(req.WebhookURL, s.serverKey, sessionID)
+
+				// Create hybrid streamer with logger for debug logging
+				// Use WorkspaceID (project ID) as channel ID so frontend can subscribe before the build starts
+				hybridStreamer := pusher.NewHybridStreamerWithLogger(pusherClient, webhookNotifier, req.WorkspaceID, s.logger)
+
+				// Create session with hybrid streamer
+				session = agent.NewSessionWithStreamer(sessionID, req.WorkspaceID, workspacePath, req.WebhookURL, &req.Config, hybridStreamer)
 			}
-
-			// Validate credentials (fail fast)
-			if err := pusherClient.ValidateCredentials(); err != nil {
-				c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Pusher validation failed: " + err.Error()})
-				return
-			}
-
-			// Create webhook notifier for critical events (status, complete, error)
-			webhookNotifier := webhook.NewNotifier(req.WebhookURL, s.serverKey, sessionID)
-
-			// Create hybrid streamer with logger for debug logging
-			// Use WorkspaceID (project ID) as channel ID so frontend can subscribe before the build starts
-			hybridStreamer := pusher.NewHybridStreamerWithLogger(pusherClient, webhookNotifier, req.WorkspaceID, s.logger)
-
-			// Create session with hybrid streamer
-			session = agent.NewSessionWithStreamer(sessionID, req.WorkspaceID, workspacePath, req.WebhookURL, &req.Config, hybridStreamer)
 		} else {
 			// Create session with webhook-only notifier
 			session = agent.NewSession(sessionID, req.WorkspaceID, workspacePath, req.WebhookURL, s.serverKey, &req.Config)
