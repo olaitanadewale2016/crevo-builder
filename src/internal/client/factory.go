@@ -19,8 +19,10 @@ const (
 	ProviderTypeAnthropic ProviderType = "anthropic"
 	ProviderTypeGrok      ProviderType = "grok"
 	ProviderTypeDeepSeek  ProviderType = "deepseek"
-	ProviderTypeZhipu     ProviderType = "zhipu"
-	ProviderTypeAbhibots  ProviderType = "abhibots"
+	ProviderTypeZhipu      ProviderType = "zhipu"
+	ProviderTypeAbhibots   ProviderType = "abhibots"
+	ProviderTypeGemini     ProviderType = "gemini"
+	ProviderTypeOpenRouter ProviderType = "openrouter"
 )
 
 // Factory creates AI providers based on type
@@ -116,6 +118,24 @@ func (f *Factory) CreateProvider(cfg models.ProviderConfig) (models.AIProvider, 
 			}
 		}
 		return anthropic.NewClientWithRetry(cfg, f.logger, anthropicRetryConfig, anthropicOnRetry), nil
+	case ProviderTypeGemini:
+		// Gemini uses OpenAI-compatible API
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+		}
+		if cfg.Model == "" {
+			cfg.Model = "gemini-2.0-flash"
+		}
+		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
+	case ProviderTypeOpenRouter:
+		// OpenRouter uses OpenAI-compatible API
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = "https://openrouter.ai/api/v1"
+		}
+		if cfg.Model == "" {
+			cfg.Model = "google/gemini-2.0-flash-exp:free"
+		}
+		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 	default:
 		// Default to OpenAI for backwards compatibility
 		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil

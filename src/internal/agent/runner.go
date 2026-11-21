@@ -585,6 +585,13 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			session.Error = err.Error()
 			streamer.SendStatus("failed", "AI provider error: "+err.Error())
 			streamer.SendError(err.Error())
+			streamer.SendComplete(models.CompleteData{
+				Iterations:   iterationsRun,
+				TokensUsed:   session.TokensUsed,
+				FilesChanged: session.FilesChanged,
+				BuildStatus:  "failed",
+				BuildMessage: "AI provider error: " + err.Error(),
+			})
 			r.logger.WithFields(logrus.Fields{
 				"session_id": session.ID,
 				"iteration":  iterationsRun,

@@ -42,6 +42,10 @@ func (c *RequestConfig) Validate() error {
 			c.Agent.Model = "claude-sonnet-4-5"
 		case "abhibots":
 			c.Agent.Model = "claude-sonnet-5"
+		case "gemini":
+			c.Agent.Model = "gemini-2.0-flash"
+		case "openrouter":
+			c.Agent.Model = "google/gemini-2.0-flash-exp:free"
 		case "zhipu":
 			c.Agent.Model = "glm-4.7"
 		case "deepseek":
@@ -61,6 +65,10 @@ func (c *RequestConfig) Validate() error {
 	// Token-aware context defaults (provider-specific)
 	if c.Agent.ContextWindow == 0 {
 		switch c.Agent.ProviderType {
+		case "gemini":
+			c.Agent.ContextWindow = 1000000
+		case "openrouter":
+			c.Agent.ContextWindow = 128000
 		case "anthropic", "abhibots":
 			c.Agent.ContextWindow = 200000
 		case "deepseek":

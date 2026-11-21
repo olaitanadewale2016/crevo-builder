@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"crevo-builder/internal/models"
@@ -43,15 +44,19 @@ func NewClientWithConfig(cfg models.ProviderConfig, logger *logrus.Logger) *Clie
 func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryConfig models.RetryConfig, onRetry models.RetryCallback) *Client {
 	var oaiClient *openai.Client
 
+	var openaiConfig openai.ClientConfig
 	if cfg.BaseURL != "" {
 		// Custom base URL (for compatible APIs)
-		openaiConfig := openai.DefaultConfig(cfg.APIKey)
+		openaiConfig = openai.DefaultConfig(cfg.APIKey)
 		openaiConfig.BaseURL = cfg.BaseURL
-		oaiClient = openai.NewClientWithConfig(openaiConfig)
 	} else {
 		// Standard OpenAI
-		oaiClient = openai.NewClient(cfg.APIKey)
+		openaiConfig = openai.DefaultConfig(cfg.APIKey)
 	}
+	openaiConfig.HTTPClient = &http.Client{
+		Timeout: 90 * time.Second,
+	}
+	oaiClient = openai.NewClientWithConfig(openaiConfig)
 
 	model := cfg.Model
 	if model == "" {

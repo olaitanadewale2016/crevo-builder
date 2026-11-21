@@ -70,6 +70,7 @@ func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryC
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
+	opts = append(opts, option.WithRequestTimeout(90*time.Second))
 
 	// Create client with options
 	anthropicClient := anthropic.NewClient(opts...)
