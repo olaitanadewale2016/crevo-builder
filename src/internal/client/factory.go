@@ -20,6 +20,7 @@ const (
 	ProviderTypeGrok      ProviderType = "grok"
 	ProviderTypeDeepSeek  ProviderType = "deepseek"
 	ProviderTypeZhipu     ProviderType = "zhipu"
+	ProviderTypeAbhibots  ProviderType = "abhibots"
 )
 
 // Factory creates AI providers based on type
@@ -80,6 +81,27 @@ func (f *Factory) CreateProvider(cfg models.ProviderConfig) (models.AIProvider, 
 		}
 		if cfg.Model == "" {
 			cfg.Model = "glm-4.7"
+		}
+		anthropicRetryConfig := anthropic.RetryConfig{
+			MaxRetries:    f.retryConfig.MaxRetries,
+			InitialDelay:  f.retryConfig.InitialDelay,
+			BackoffFactor: f.retryConfig.BackoffFactor,
+			Jitter:        f.retryConfig.Jitter,
+		}
+		var anthropicOnRetry anthropic.RetryCallback
+		if f.onRetry != nil {
+			anthropicOnRetry = func(attempt, maxRetries int, delay time.Duration, reason string) {
+				f.onRetry(attempt, maxRetries, delay, fmt.Errorf("retry: %s", reason))
+			}
+		}
+		return anthropic.NewClientWithRetry(cfg, f.logger, anthropicRetryConfig, anthropicOnRetry), nil
+	case ProviderTypeAbhibots:
+		// Abhibots uses Anthropic-compatible API via opus.abhibots.com
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = "https://opus.abhibots.com"
+		}
+		if cfg.Model == "" {
+			cfg.Model = "claude-sonnet-5"
 		}
 		anthropicRetryConfig := anthropic.RetryConfig{
 			MaxRetries:    f.retryConfig.MaxRetries,

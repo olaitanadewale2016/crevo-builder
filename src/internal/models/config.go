@@ -40,6 +40,8 @@ func (c *RequestConfig) Validate() error {
 		switch c.Agent.ProviderType {
 		case "anthropic":
 			c.Agent.Model = "claude-sonnet-4-5"
+		case "abhibots":
+			c.Agent.Model = "claude-sonnet-5"
 		case "zhipu":
 			c.Agent.Model = "glm-4.7"
 		case "deepseek":
@@ -59,7 +61,7 @@ func (c *RequestConfig) Validate() error {
 	// Token-aware context defaults (provider-specific)
 	if c.Agent.ContextWindow == 0 {
 		switch c.Agent.ProviderType {
-		case "anthropic":
+		case "anthropic", "abhibots":
 			c.Agent.ContextWindow = 200000
 		case "deepseek":
 			c.Agent.ContextWindow = 64000
