@@ -133,7 +133,7 @@ func (f *Factory) CreateProvider(cfg models.ProviderConfig) (models.AIProvider, 
 			cfg.BaseURL = "https://openrouter.ai/api/v1"
 		}
 		if cfg.Model == "" {
-			cfg.Model = "google/gemini-2.0-flash-exp:free"
+			cfg.Model = "openrouter/free"
 		}
 		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 	default:

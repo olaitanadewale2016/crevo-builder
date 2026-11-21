@@ -45,7 +45,7 @@ func (c *RequestConfig) Validate() error {
 		case "gemini":
 			c.Agent.Model = "gemini-2.0-flash"
 		case "openrouter":
-			c.Agent.Model = "google/gemini-2.0-flash-exp:free"
+			c.Agent.Model = "openrouter/free"
 		case "zhipu":
 			c.Agent.Model = "glm-4.7"
 		case "deepseek":
@@ -68,7 +68,7 @@ func (c *RequestConfig) Validate() error {
 		case "gemini":
 			c.Agent.ContextWindow = 1000000
 		case "openrouter":
-			c.Agent.ContextWindow = 128000
+			c.Agent.ContextWindow = 200000
 		case "anthropic", "abhibots":
 			c.Agent.ContextWindow = 200000
 		case "deepseek":
