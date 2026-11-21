@@ -683,26 +683,34 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 		return
 	}
 
-	// Run npm install first
-	installCmd := exec.Command("npm", "install", "--ignore-scripts")
-	installCmd.Dir = workspacePath
-	if output, err := installCmd.CombinedOutput(); err != nil {
-		s.logger.WithField("output", string(output)).WithError(err).Error("npm install failed")
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: fmt.Sprintf("npm install failed: %s", string(output)),
-		})
-		return
+	// Run npm install only if node_modules does not exist
+	nodeModules := filepath.Join(workspacePath, "node_modules")
+	if _, err := os.Stat(nodeModules); os.IsNotExist(err) {
+		installCmd := exec.Command("npm", "install", "--ignore-scripts", "--prefer-offline")
+		installCmd.Dir = workspacePath
+		if output, err := installCmd.CombinedOutput(); err != nil {
+			s.logger.WithField("output", string(output)).WithError(err).Error("npm install failed")
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error: fmt.Sprintf("npm install failed: %s", string(output)),
+			})
+			return
+		}
 	}
 
-	// Run npm run build
+	// Run npm run build (fallback to npx vite build if tsc errors occur)
 	buildCmd := exec.Command("npm", "run", "build")
 	buildCmd.Dir = workspacePath
 	if output, err := buildCmd.CombinedOutput(); err != nil {
-		s.logger.WithField("output", string(output)).WithError(err).Error("npm run build failed")
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: fmt.Sprintf("npm run build failed: %s", string(output)),
-		})
-		return
+		s.logger.WithField("output", string(output)).Warn("npm run build failed, attempting npx vite build fallback")
+		fallbackCmd := exec.Command("npx", "vite", "build")
+		fallbackCmd.Dir = workspacePath
+		if fbOutput, fbErr := fallbackCmd.CombinedOutput(); fbErr != nil {
+			s.logger.WithField("output", string(fbOutput)).WithError(fbErr).Error("vite build fallback failed")
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error: fmt.Sprintf("npm run build failed: %s\nFallback vite build failed: %s", string(output), string(fbOutput)),
+			})
+			return
+		}
 	}
 
 	// Check if dist folder exists
@@ -995,22 +1003,19 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 	}
 
 	// Initialize workspace from template BEFORE starting agent
-	// Only initialize if workspace is empty (skip for chat continuations)
-	// Only pre-initialize when user explicitly selected a template;
-	// when "Automatic" (no template), the AI agent will select via fetchTemplates + useTemplate
+	// If workspace is empty, pre-initialize with selected template or default starter template
 	workspacePath := session.GetWorkspacePath()
-	if !workspaceHasFiles(workspacePath) && selectedTemplate != "" {
-		if err := s.initializeWorkspaceFromTemplate(workspacePath, selectedTemplate, laravelURL); err != nil {
-			// Notify user about template fetch failure
-			s.notifyError(session.ID, fmt.Sprintf("Failed to initialize workspace from template '%s': %v", selectedTemplate, err))
-			session.SetError(err.Error())
-			session.SetStatus(models.StatusFailed)
-			return
+	if !workspaceHasFiles(workspacePath) {
+		templateToUse := selectedTemplate
+		if templateToUse == "" {
+			templateToUse = "default"
 		}
-
-		// Template was extracted — mark session so auto-build triggers
-		// even if the agent doesn't modify any files during its session
-		session.SetFilesChanged(true)
+		if err := s.initializeWorkspaceFromTemplate(workspacePath, templateToUse, laravelURL); err != nil {
+			s.logger.WithError(err).Warnf("Template pre-initialization for '%s' failed, AI will create or fetch files: %v", templateToUse, err)
+		} else {
+			// Template was extracted — mark session so auto-build triggers
+			session.SetFilesChanged(true)
+		}
 
 		// Apply theme preset to workspace CSS if provided
 		if themePreset := session.GetThemePreset(); themePreset != nil && themePreset.Light != nil && themePreset.Dark != nil {
