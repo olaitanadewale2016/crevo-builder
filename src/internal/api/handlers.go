@@ -689,7 +689,7 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	if output, err := installCmd.CombinedOutput(); err != nil {
 		s.logger.WithField("output", string(output)).WithError(err).Error("npm install failed")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: "npm install failed",
+			Error: fmt.Sprintf("npm install failed: %s", string(output)),
 		})
 		return
 	}
@@ -700,7 +700,7 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		s.logger.WithField("output", string(output)).WithError(err).Error("npm run build failed")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: "Build failed",
+			Error: fmt.Sprintf("npm run build failed: %s", string(output)),
 		})
 		return
 	}
