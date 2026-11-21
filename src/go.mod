@@ -1,6 +1,6 @@
 module crevo-builder
 
-go 1.25.5
+go 1.23
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.27.0
