@@ -1,0 +1,18 @@
+# Prebuilt binaries
+prebuilt/
+dist/
+/bin/
+
+# Storage & runtime
+storage/
+*.log
+*.tmp
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/

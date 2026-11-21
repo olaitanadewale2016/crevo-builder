@@ -1,0 +1,6 @@
+prebuilt/
+dist/
+storage/
+.git/
+.gitignore
+*.log
