@@ -1,7 +1,7 @@
 # ==========================================
 # Stage 1: Build the Go Builder Binary
 # ==========================================
-FROM golang:1.23-alpine AS builder
+FROM golang:alpine AS builder
 
 WORKDIR /app
 
