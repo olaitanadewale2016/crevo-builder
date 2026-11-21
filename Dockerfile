@@ -18,7 +18,7 @@ RUN go mod download
 COPY src/ ./
 
 # Build optimized binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o crevo-builder app.go
+RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o crevo-builder app.go
 
 # ==========================================
 # Stage 2: Production Runtime with Node.js & npm
