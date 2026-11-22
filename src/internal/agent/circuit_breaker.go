@@ -53,13 +53,13 @@ func NewCircuitBreaker() *CircuitBreaker {
 		toolFailures:      make(map[string]int),
 		toolRecoveries:    make(map[string]int),
 		fileFailures:      make(map[string]int),
-		maxToolFailures:   3,
-		maxToolRecoveries: 2,
-		maxGlobalFailures: 10,
-		maxSameErrors:     5,
+		maxToolFailures:   4,
+		maxToolRecoveries: 3,
+		maxGlobalFailures: 14,
+		maxSameErrors:     6,
 		toolFailureLimits: map[string]int{
-			"verifyBuild":       5,
-			"verifyIntegration": 4,
+			"verifyBuild":       6,
+			"verifyIntegration": 5,
 		},
 	}
 }
@@ -70,13 +70,13 @@ func NewCircuitBreakerForModel(providerType, model string) *CircuitBreaker {
 	tier := getModelTier(providerType, model)
 	switch tier {
 	case "standard":
-		cb.maxGlobalFailures = 8
-		cb.maxToolFailures = 2
-		cb.maxToolRecoveries = 1
-	default: // "advanced"
-		cb.maxGlobalFailures = 10
+		cb.maxGlobalFailures = 12
 		cb.maxToolFailures = 3
 		cb.maxToolRecoveries = 2
+	default: // "advanced"
+		cb.maxGlobalFailures = 16
+		cb.maxToolFailures = 4
+		cb.maxToolRecoveries = 3
 	}
 	return cb
 }

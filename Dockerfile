@@ -30,6 +30,9 @@ WORKDIR /app
 # Install runtime utilities & git (required for npm dependencies & builds)
 RUN apk add --no-cache ca-certificates git curl bash
 
+# Install global build and validation tools (instant zero-network execution)
+RUN npm install -g typescript esbuild vite
+
 # Create required runtime directories
 RUN mkdir -p storage/workspaces storage/logs prompts
 

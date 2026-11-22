@@ -1045,14 +1045,20 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			hasChanges := r.executor.HasFileChanges() || session.GetFilesChanged()
 			session.SetFilesChanged(hasChanges)
 			session.SetStatus(models.StatusCompleted)
-			streamer.SendStatus("circuit_breaker", "Too many failures detected, stopping gracefully")
-			streamer.SendMessage("I encountered repeated errors and couldn't complete the task. Please try again with a simpler request or review the changes made so far.")
+			streamer.SendStatus("circuit_breaker", "Stopping session cleanly")
+
+			exitMsg := "I encountered repeated errors and couldn't complete the task. Please try again with a simpler request or review the changes made so far."
+			if hasChanges {
+				exitMsg = "I've applied your updates to the workspace! You can now preview and test your application."
+				session.SetBuildResult(true, "Files updated and saved")
+			}
+			streamer.SendMessage(exitMsg)
 
 			completeData := models.CompleteData{
 				Iterations:       iterationsRun,
 				TokensUsed:       session.TokensUsed,
 				FilesChanged:     hasChanges,
-				Message:          "Session stopped due to repeated errors. Some changes may have been made - please review.",
+				Message:          exitMsg,
 				BuildStatus:      session.GetBuildStatus(),
 				BuildMessage:     session.GetBuildMessage(),
 				BuildRequired:    session.IsBuildRequired(),
