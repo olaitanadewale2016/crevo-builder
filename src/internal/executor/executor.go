@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -137,18 +136,9 @@ func (e *Executor) ensureDependenciesInstalled(ctx context.Context) error {
 		return nil
 	}
 
-	// If node_modules already exists, mark as installed
-	nodeModulesPath := filepath.Join(workspacePath, "node_modules")
-	if _, err := os.Stat(nodeModulesPath); err == nil {
-		e.depsInstalled = true
-		return nil
-	}
-
-	// Run npm install
-	installCmd := exec.CommandContext(ctx, "npm", "install", "--ignore-scripts")
-	installCmd.Dir = workspacePath
-	if output, err := installCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("npm install failed: %s\n%s", err.Error(), string(output))
+	// Use 40ms hardlink cache (or one-time offline-preferred install)
+	if err := EnsureSharedNodeModules(ctx, workspacePath); err != nil {
+		return fmt.Errorf("dependency setup failed: %w", err)
 	}
 
 	e.depsInstalled = true

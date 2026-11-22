@@ -729,9 +729,11 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	viteBin := filepath.Join(workspacePath, "node_modules", ".bin", "vite")
 	var buildCmd *exec.Cmd
 	if _, err := os.Stat(viteBin); err == nil {
-		buildCmd = exec.Command(viteBin, "build", "--logLevel", "error")
+		buildCmd = exec.CommandContext(c.Request.Context(), viteBin, "build", "--logLevel", "error")
+	} else if globalVite, err := exec.LookPath("vite"); err == nil {
+		buildCmd = exec.CommandContext(c.Request.Context(), globalVite, "build", "--logLevel", "error")
 	} else {
-		buildCmd = exec.Command("npx", "vite", "build", "--logLevel", "error")
+		buildCmd = exec.CommandContext(c.Request.Context(), "npx", "vite", "build", "--logLevel", "error")
 	}
 	buildCmd.Dir = workspacePath
 	if output, err := buildCmd.CombinedOutput(); err != nil {
@@ -858,10 +860,13 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 		return
 	}
 
-	// 1. Look in dist folder first (if built); if dist/index.html is missing, build on-the-fly so we NEVER serve raw uncompiled index.html
+	// 1. Look in dist folder first (if built & up-to-date); if missing or stale on entry HTML request, build on-the-fly so we NEVER serve raw uncompiled index.html
 	distPath := filepath.Join(workspacePath, "dist")
 	distIndex := filepath.Join(distPath, "index.html")
-	if _, err := os.Stat(distIndex); os.IsNotExist(err) {
+	isEntryRequest := reqPath == "index.html" || !strings.Contains(filepath.Base(reqPath), ".")
+	_, distStatErr := os.Stat(distIndex)
+	needsBuild := os.IsNotExist(distStatErr) || (isEntryRequest && !isDistUpToDate(workspacePath))
+	if needsBuild {
 		pkgJSON := filepath.Join(workspacePath, "package.json")
 		if _, pkgErr := os.Stat(pkgJSON); pkgErr == nil {
 			if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err == nil {
@@ -869,6 +874,8 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 				var buildCmd *exec.Cmd
 				if _, vErr := os.Stat(viteBin); vErr == nil {
 					buildCmd = exec.CommandContext(c.Request.Context(), viteBin, "build", "--logLevel", "error")
+				} else if globalVite, vErr := exec.LookPath("vite"); vErr == nil {
+					buildCmd = exec.CommandContext(c.Request.Context(), globalVite, "build", "--logLevel", "error")
 				} else {
 					buildCmd = exec.CommandContext(c.Request.Context(), "npx", "vite", "build", "--logLevel", "error")
 				}

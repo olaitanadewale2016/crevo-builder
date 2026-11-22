@@ -203,7 +203,9 @@ func (e *FileExecutor) validateTypeScript(ctx context.Context, filePath string) 
 	if err != nil {
 		return fmt.Errorf("failed to compute relative path: %w", err)
 	}
-	cmd := exec.CommandContext(validateCtx, "npx", "esbuild", relPath, "--loader:.tsx=tsx", "--loader:.ts=ts", "--outfile=/dev/null")
+	bin, prefix := resolveToolCommand(e.workspacePath, "esbuild")
+	cmdArgs := append(prefix, relPath, "--loader:.tsx=tsx", "--loader:.ts=ts", "--outfile=/dev/null")
+	cmd := exec.CommandContext(validateCtx, bin, cmdArgs...)
 	cmd.Dir = e.workspacePath
 
 	output, err := cmd.CombinedOutput()

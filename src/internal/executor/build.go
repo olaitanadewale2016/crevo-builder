@@ -86,6 +86,18 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	return nil
 }
 
+// resolveToolCommand prefers workspace local .bin, then global PATH binary (zero npx overhead), then npx fallback.
+func resolveToolCommand(workspacePath, tool string) (string, []string) {
+	localBin := filepath.Join(workspacePath, "node_modules", ".bin", tool)
+	if _, err := os.Stat(localBin); err == nil {
+		return localBin, nil
+	}
+	if globalBin, err := exec.LookPath(tool); err == nil {
+		return globalBin, nil
+	}
+	return "npx", []string{tool}
+}
+
 // VerifyBuild runs fast Vite build verification (skipping slow tsc -b) and ensures dist/index.html is generated
 func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
 	// Minimum 120s timeout so initial dependency installation is never killed prematurely
@@ -106,13 +118,9 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	}
 
 	// Run fast Vite build directly (skips slow 25s tsc -b pass while bundling production dist/ with esbuild in ~2s)
-	viteBin := filepath.Join(e.workspacePath, "node_modules", ".bin", "vite")
-	var viteCmd *exec.Cmd
-	if _, err := os.Stat(viteBin); err == nil {
-		viteCmd = exec.CommandContext(ctx, viteBin, "build", "--logLevel", "error")
-	} else {
-		viteCmd = exec.CommandContext(ctx, "npx", "vite", "build", "--logLevel", "error")
-	}
+	bin, prefix := resolveToolCommand(e.workspacePath, "vite")
+	cmdArgs := append(prefix, "build", "--logLevel", "error")
+	viteCmd := exec.CommandContext(ctx, bin, cmdArgs...)
 	viteCmd.Dir = e.workspacePath
 	viteOutput, viteErr := viteCmd.CombinedOutput()
 	outputStr := string(viteOutput)
@@ -155,7 +163,9 @@ func (e *BuildExecutor) validateWorkspaceSyntax(ctx context.Context) error {
 			if ext == ".ts" {
 				loader = "ts"
 			}
-			cmd := exec.CommandContext(ctx, "npx", "esbuild", relPath, fmt.Sprintf("--loader:%s=%s", ext[1:], loader), "--outfile=/dev/null")
+			bin, prefix := resolveToolCommand(e.workspacePath, "esbuild")
+			cmdArgs := append(prefix, relPath, fmt.Sprintf("--loader:%s=%s", ext[1:], loader), "--outfile=/dev/null")
+			cmd := exec.CommandContext(ctx, bin, cmdArgs...)
 			cmd.Dir = e.workspacePath
 			if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
 				outStr := string(out)
