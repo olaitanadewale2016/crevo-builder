@@ -52,6 +52,7 @@ func (s *Server) SetupRouter() *gin.Engine {
 		api.POST("/build-workspace/:workspace_id", s.handleBuild)
 		api.GET("/build-output/:session_id", s.handleBuildOutput)
 		api.GET("/build-output-workspace/:workspace_id", s.handleBuildOutput)
+		api.GET("/preview-asset/:workspace_id/*filepath", s.handlePreviewAsset)
 
 		// Other
 		api.POST("/reset/:session_id", s.handleReset)

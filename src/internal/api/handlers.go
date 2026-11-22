@@ -798,6 +798,124 @@ func (s *Server) serveBuildOutput(c *gin.Context, workspacePath, workspaceID str
 	c.Data(http.StatusOK, "application/zip", buf.Bytes())
 }
 
+// GET /api/preview-asset/:workspace_id/*filepath - Stream preview assets directly from workspace memory/disk
+func (s *Server) handlePreviewAsset(c *gin.Context) {
+	workspacePath, workspaceID, ok := s.resolveWorkspaceFromRequest(c)
+	if !ok {
+		return
+	}
+
+	reqPath := strings.TrimPrefix(c.Param("filepath"), "/")
+	if reqPath == "" {
+		reqPath = "index.html"
+	}
+
+	// Prevent directory traversal
+	if strings.Contains(reqPath, "..") {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+
+	projectID := extractProjectID(workspaceID)
+
+	// 1. Look in dist folder first (if built)
+	distPath := filepath.Join(workspacePath, "dist")
+	targetFile := filepath.Join(distPath, filepath.Clean(reqPath))
+
+	if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
+		s.serveAssetFile(c, targetFile, reqPath, projectID)
+		return
+	}
+
+	// If directory or no extension in path, try dist/index.html (SPA routing fallback)
+	if !strings.Contains(filepath.Base(reqPath), ".") {
+		distIndex := filepath.Join(distPath, "index.html")
+		if _, err := os.Stat(distIndex); err == nil {
+			s.serveAssetFile(c, distIndex, "index.html", projectID)
+			return
+		}
+	}
+
+	// 2. Look in workspace root (e.g. index.html, public/ assets, image-library/)
+	rootTarget := filepath.Join(workspacePath, filepath.Clean(reqPath))
+	if info, err := os.Stat(rootTarget); err == nil && !info.IsDir() {
+		s.serveAssetFile(c, rootTarget, reqPath, projectID)
+		return
+	}
+
+	// Try public/ folder
+	pubTarget := filepath.Join(workspacePath, "public", filepath.Clean(reqPath))
+	if info, err := os.Stat(pubTarget); err == nil && !info.IsDir() {
+		s.serveAssetFile(c, pubTarget, reqPath, projectID)
+		return
+	}
+
+	// 3. Fallbacks for index.html
+	distIndex := filepath.Join(distPath, "index.html")
+	if _, err := os.Stat(distIndex); err == nil {
+		s.serveAssetFile(c, distIndex, "index.html", projectID)
+		return
+	}
+
+	rootIndex := filepath.Join(workspacePath, "index.html")
+	if _, err := os.Stat(rootIndex); err == nil {
+		s.serveAssetFile(c, rootIndex, "index.html", projectID)
+		return
+	}
+
+	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) serveAssetFile(c *gin.Context, fullPath, relPath, projectID string) {
+	ext := strings.ToLower(filepath.Ext(fullPath))
+	contentType := "application/octet-stream"
+	switch ext {
+	case ".html", ".htm":
+		contentType = "text/html; charset=utf-8"
+	case ".js", ".mjs":
+		contentType = "application/javascript"
+	case ".css":
+		contentType = "text/css"
+	case ".json":
+		contentType = "application/json"
+	case ".png":
+		contentType = "image/png"
+	case ".jpg", ".jpeg":
+		contentType = "image/jpeg"
+	case ".svg":
+		contentType = "image/svg+xml"
+	case ".webp":
+		contentType = "image/webp"
+	case ".ico":
+		contentType = "image/x-icon"
+	case ".woff":
+		contentType = "font/woff"
+	case ".woff2":
+		contentType = "font/woff2"
+	}
+
+	cacheControl := "no-cache, no-store, must-revalidate"
+	if strings.HasPrefix(relPath, "assets/") {
+		cacheControl = "public, max-age=31536000, immutable"
+	}
+
+	c.Header("Content-Type", contentType)
+	c.Header("Cache-Control", cacheControl)
+
+	if ext == ".html" || ext == ".htm" {
+		data, err := os.ReadFile(fullPath)
+		if err == nil {
+			if projectID != "" {
+				data = injectBaseTag(data, projectID)
+			}
+			c.Data(http.StatusOK, contentType, data)
+			return
+		}
+	}
+
+	c.File(fullPath)
+}
+
 // POST /api/reset/:session_id - Reset workspace
 func (s *Server) handleReset(c *gin.Context) {
 	sessionID := c.Param("session_id")
