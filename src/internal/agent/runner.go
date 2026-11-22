@@ -695,6 +695,21 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 		// Check if done (no tool calls)
 		if len(response.ToolCalls) == 0 {
+			// If it's early in the session and no files have been modified yet, nudge the AI to use its tools
+			if !emptyResponseNudged && !r.executor.HasFileChanges() && iterationsRun <= 2 {
+				emptyResponseNudged = true
+				r.logger.WithFields(logrus.Fields{
+					"session_id": session.ID,
+					"iteration":  iterationsRun,
+				}).Debug("AI returned no tool calls without making changes, nudging to execute tools")
+
+				messages = append(messages, models.Message{
+					Role:    "user",
+					Content: "You are an autonomous website builder agent. You have not executed any tools or created any website files yet. You MUST read template.json and execute tool calls (e.g. readFile, createFile, editFile) to build the website requested by the user.",
+				})
+				continue
+			}
+
 			// If AI returned an empty response (no content, no tool calls), nudge it once
 			// to provide a final summary. This happens when AI templates already satisfy the
 			// goal and the AI has nothing to change but also doesn't send a closing message.
@@ -1251,8 +1266,10 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		// Context-aware fallback: distinguish between agent modifications and template-only projects
 		if r.executor.HasFileChanges() {
 			lastAIContent = "Done! I've made the changes to your website."
-		} else {
+		} else if session.GetFilesChanged() {
 			lastAIContent = "Your website is ready! You can preview it now."
+		} else {
+			lastAIContent = "I've reviewed your request. Please specify which pages or components you'd like to create."
 		}
 		streamer.SendMessage(lastAIContent)
 	} else if len(lastAIContent) <= 100 {
