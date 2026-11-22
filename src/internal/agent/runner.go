@@ -1308,6 +1308,14 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 	hasChanges := r.executor.HasFileChanges() || session.GetFilesChanged()
 	session.SetFilesChanged(hasChanges)
 
+	// Ensure build is compiled into dist/ before completion so preview and R2 upload are instantaneous
+	if hasChanges {
+		bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil)
+		if bErr == nil && bResult != nil {
+			session.SetBuildResult(bResult.Success, bResult.Content)
+		}
+	}
+
 	// Send completion (synchronous - blocks until Pusher confirms delivery)
 	streamer.SendComplete(models.CompleteData{
 		Iterations:       session.Iterations,

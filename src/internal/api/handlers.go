@@ -881,10 +881,12 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 	if needsBuild {
 		pkgJSON := filepath.Join(workspacePath, "package.json")
 		if _, pkgErr := os.Stat(pkgJSON); pkgErr == nil {
-			if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err == nil {
+			bCtx, bCancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer bCancel()
+			if err := executor.EnsureSharedNodeModules(bCtx, workspacePath); err == nil {
 				bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
 				cmdArgs := append(prefix, "build", "--logLevel", "error")
-				buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
+				buildCmd := exec.CommandContext(bCtx, bin, cmdArgs...)
 				buildCmd.Dir = workspacePath
 				if bOut, bErr := buildCmd.CombinedOutput(); bErr != nil {
 					s.logger.WithError(bErr).WithField("output", string(bOut)).Warn("on-the-fly vite build failed in handlePreviewAsset")

@@ -82,14 +82,31 @@ func init() {
 }
 
 // SearchImages finds images matching the given filters. Empty string means "any".
+// When a category/topic is specified, curated industry photography is prioritized first,
+// followed by matching local gallery/background images.
 func SearchImages(imageType, category, mood, tone string, limit int) []ImageEntry {
 	if limit <= 0 {
 		limit = 10
 	}
 
 	var results []ImageEntry
-	var pool []ImageEntry
+	seen := make(map[string]bool)
 
+	if category != "" {
+		curated := SearchCuratedIndustryImages(category, imageType, mood, tone, limit)
+		for _, img := range curated {
+			if !seen[img.Filename] {
+				seen[img.Filename] = true
+				results = append(results, img)
+			}
+		}
+	}
+
+	if len(results) >= limit {
+		return results[:limit]
+	}
+
+	var pool []ImageEntry
 	switch imageType {
 	case "background":
 		pool = AllBackgroundImages
@@ -100,6 +117,9 @@ func SearchImages(imageType, category, mood, tone string, limit int) []ImageEntr
 	}
 
 	for _, img := range pool {
+		if seen[img.Filename] {
+			continue
+		}
 		if category != "" && !matchesCategory(img, category) {
 			continue
 		}
@@ -109,16 +129,25 @@ func SearchImages(imageType, category, mood, tone string, limit int) []ImageEntr
 		if tone != "" && img.Tone != tone {
 			continue
 		}
+		seen[img.Filename] = true
 		results = append(results, img)
 		if len(results) >= limit {
 			break
 		}
 	}
 
-	// If local search produced fewer results and a category was requested, search curated industry catalog
-	if len(results) < limit && category != "" {
-		curated := SearchCuratedIndustryImages(category, imageType, mood, tone, limit-len(results))
-		results = append(results, curated...)
+	// If no category filter was provided and slots remain, include curated photography too
+	if len(results) < limit && category == "" {
+		curated := SearchCuratedIndustryImages("", imageType, mood, tone, limit-len(results))
+		for _, img := range curated {
+			if !seen[img.Filename] {
+				seen[img.Filename] = true
+				results = append(results, img)
+				if len(results) >= limit {
+					break
+				}
+			}
+		}
 	}
 
 	return results

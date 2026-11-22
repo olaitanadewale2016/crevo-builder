@@ -96,7 +96,7 @@ func newNotifier(ctx context.Context, cancel context.CancelFunc, webhookURL, ser
 		maxRetries: maxRetries,
 		retryDelay: retryDelay,
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 60 * time.Second,
 		},
 		ctx:        ctx,
 		cancel:     cancel,
