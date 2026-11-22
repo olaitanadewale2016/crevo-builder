@@ -7,10 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"crevo-builder/internal/models"
 )
+
+var nodeModulesMu sync.Mutex
 
 // BuildExecutor handles build verification
 type BuildExecutor struct {
@@ -26,42 +29,66 @@ func NewBuildExecutor(workspacePath string, toolConfig models.ToolExecutionConfi
 	}
 }
 
-// ensureNodeModules links the shared node_modules cache or installs once and populates the cache
+// EnsureSharedNodeModules copies the shared node_modules cache using zero-space hardlinks (cp -al)
+// or installs once and populates the shared cache. Avoids directory symlinks which break Node/Vite realpath resolution.
 func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	nodeModulesPath := filepath.Join(workspacePath, "node_modules")
-	if _, err := os.Lstat(nodeModulesPath); err == nil {
-		return nil
-	}
 
-	sharedCacheDir := filepath.Join(filepath.Dir(workspacePath), "_shared_node_modules")
-	if info, err := os.Stat(sharedCacheDir); err == nil && info.IsDir() {
-		absShared, absErr := filepath.Abs(sharedCacheDir)
-		if absErr == nil {
-			if symErr := os.Symlink(absShared, nodeModulesPath); symErr == nil {
+	// If node_modules is an old symlink from a previous build, remove the symlink so real directories are used
+	if info, err := os.Lstat(nodeModulesPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			_ = os.Remove(nodeModulesPath)
+		} else if info.IsDir() {
+			viteBin := filepath.Join(nodeModulesPath, ".bin", "vite")
+			if _, vErr := os.Stat(viteBin); vErr == nil {
 				return nil
 			}
 		}
 	}
 
-	installCmd := exec.CommandContext(ctx, "npm", "install", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
-	installCmd.Dir = workspacePath
-	if _, err := installCmd.CombinedOutput(); err != nil {
-		return err
+	nodeModulesMu.Lock()
+	defer nodeModulesMu.Unlock()
+
+	sharedCacheDir := filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules")
+	sharedViteBin := filepath.Join(sharedCacheDir, ".bin", "vite")
+
+	// Fast path: hardlink-copy shared node_modules into workspace (~40ms, 0 extra disk space, real paths for Vite)
+	if _, err := os.Stat(sharedViteBin); err == nil {
+		cpCmd := exec.CommandContext(ctx, "cp", "-al", sharedCacheDir, nodeModulesPath)
+		if err := cpCmd.Run(); err == nil {
+			return nil
+		}
+		// Fallback to regular recursive copy if hardlinks fail across mount points
+		_ = os.RemoveAll(nodeModulesPath)
+		cpFallback := exec.CommandContext(ctx, "cp", "-a", sharedCacheDir, nodeModulesPath)
+		if err := cpFallback.Run(); err == nil {
+			return nil
+		}
+		_ = os.RemoveAll(nodeModulesPath)
 	}
 
-	// Promote installed node_modules to shared cache for future workspaces (instant 1ms symlinks)
-	if _, err := os.Stat(sharedCacheDir); os.IsNotExist(err) {
-		if renameErr := os.Rename(nodeModulesPath, sharedCacheDir); renameErr == nil {
-			absShared, _ := filepath.Abs(sharedCacheDir)
-			_ = os.Symlink(absShared, nodeModulesPath)
+	// Cold start: install dependencies once in workspace
+	installCmd := exec.CommandContext(ctx, "npm", "install", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
+	installCmd.Dir = workspacePath
+	if out, err := installCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("npm install failed: %v (%s)", err, string(out))
+	}
+
+	// Populate shared cache via hardlink copy while keeping workspace node_modules intact
+	if _, err := os.Stat(sharedViteBin); os.IsNotExist(err) {
+		_ = os.RemoveAll(sharedCacheDir)
+		populateCmd := exec.CommandContext(ctx, "cp", "-al", nodeModulesPath, sharedCacheDir)
+		if populateErr := populateCmd.Run(); populateErr != nil {
+			_ = os.RemoveAll(sharedCacheDir)
+			_ = exec.CommandContext(ctx, "cp", "-a", nodeModulesPath, sharedCacheDir).Run()
 		}
 	}
 	return nil
 }
 
-// VerifyBuild runs fast build verification and component validation
+// VerifyBuild runs fast Vite build verification (skipping slow tsc -b) and ensures dist/index.html is generated
 func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-	// Minimum 120s timeout so dependency installation is never killed prematurely
+	// Minimum 120s timeout so initial dependency installation is never killed prematurely
 	timeout := time.Duration(e.toolConfig.Timeout) * time.Second
 	if timeout < 120*time.Second {
 		timeout = 120 * time.Second
@@ -70,21 +97,15 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Ensure node_modules exists via 1ms shared cache symlink or one-time npm install
+	// Ensure node_modules exists via 40ms hardlink cache or one-time npm install
 	if err := EnsureSharedNodeModules(ctx, e.workspacePath); err != nil {
-		if syntaxErr := e.validateWorkspaceSyntax(ctx); syntaxErr != nil {
-			return &ToolResult{
-				Success: false,
-				Content: fmt.Sprintf("Component syntax error:\n%s", syntaxErr.Error()),
-			}, nil
-		}
 		return &ToolResult{
-			Success: true,
-			Content: "Build verified! All component files have valid syntax.",
+			Success: false,
+			Content: fmt.Sprintf("Failed to prepare dependencies:\n%s", err.Error()),
 		}, nil
 	}
 
-	// 1. Run fast Vite build directly (skips slow 20s tsc -b pass while bundling production dist/ with esbuild)
+	// Run fast Vite build directly (skips slow 25s tsc -b pass while bundling production dist/ with esbuild in ~2s)
 	viteBin := filepath.Join(e.workspacePath, "node_modules", ".bin", "vite")
 	var viteCmd *exec.Cmd
 	if _, err := os.Stat(viteBin); err == nil {
@@ -96,22 +117,17 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	viteOutput, viteErr := viteCmd.CombinedOutput()
 	outputStr := string(viteOutput)
 
+	distIndex := filepath.Join(e.workspacePath, "dist", "index.html")
 	if viteErr == nil {
-		return &ToolResult{
-			Success: true,
-			Content: "Build successful! All components compiled cleanly.",
-		}, nil
+		if _, statErr := os.Stat(distIndex); statErr == nil {
+			return &ToolResult{
+				Success: true,
+				Content: "Build successful! All components compiled cleanly.",
+			}, nil
+		}
 	}
 
-	// 2. Fallback: Check if failure is only due to non-breaking warnings
-	if syntaxErr := e.validateWorkspaceSyntax(ctx); syntaxErr == nil && !hasFatalSyntaxError(outputStr) {
-		return &ToolResult{
-			Success: true,
-			Content: "Build verified! All components have valid syntax and are ready for preview.",
-		}, nil
-	}
-
-	// 3. Return clear error summary so AI can fix the specific file/line
+	// Return clear error summary so AI can fix any broken import or syntax error immediately
 	errorSummary := extractBuildErrors(outputStr)
 
 	return &ToolResult{

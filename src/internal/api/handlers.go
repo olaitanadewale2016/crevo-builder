@@ -858,49 +858,47 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 		return
 	}
 
-	// 1. Look in dist folder first (if built)
+	// 1. Look in dist folder first (if built); if dist/index.html is missing, build on-the-fly so we NEVER serve raw uncompiled index.html
 	distPath := filepath.Join(workspacePath, "dist")
-	targetFile := filepath.Join(distPath, filepath.Clean(reqPath))
+	distIndex := filepath.Join(distPath, "index.html")
+	if _, err := os.Stat(distIndex); os.IsNotExist(err) {
+		pkgJSON := filepath.Join(workspacePath, "package.json")
+		if _, pkgErr := os.Stat(pkgJSON); pkgErr == nil {
+			if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err == nil {
+				viteBin := filepath.Join(workspacePath, "node_modules", ".bin", "vite")
+				var buildCmd *exec.Cmd
+				if _, vErr := os.Stat(viteBin); vErr == nil {
+					buildCmd = exec.CommandContext(c.Request.Context(), viteBin, "build", "--logLevel", "error")
+				} else {
+					buildCmd = exec.CommandContext(c.Request.Context(), "npx", "vite", "build", "--logLevel", "error")
+				}
+				buildCmd.Dir = workspacePath
+				_ = buildCmd.Run()
+			}
+		}
+	}
 
+	targetFile := filepath.Join(distPath, filepath.Clean(reqPath))
 	if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
 		s.serveAssetFile(c, targetFile, reqPath, projectID)
 		return
 	}
 
-	// If directory or no extension in path, try dist/index.html (SPA routing fallback)
-	if !strings.Contains(filepath.Base(reqPath), ".") {
-		distIndex := filepath.Join(distPath, "index.html")
-		if _, err := os.Stat(distIndex); err == nil {
-			s.serveAssetFile(c, distIndex, "index.html", projectID)
+	// 2. Try public/ folder for static non-HTML assets (e.g. favicon, images)
+	if !strings.HasSuffix(strings.ToLower(reqPath), ".html") {
+		pubTarget := filepath.Join(workspacePath, "public", filepath.Clean(reqPath))
+		if info, err := os.Stat(pubTarget); err == nil && !info.IsDir() {
+			s.serveAssetFile(c, pubTarget, reqPath, projectID)
 			return
 		}
 	}
 
-	// 2. Look in workspace root (e.g. index.html, public/ assets, image-library/)
-	rootTarget := filepath.Join(workspacePath, filepath.Clean(reqPath))
-	if info, err := os.Stat(rootTarget); err == nil && !info.IsDir() {
-		s.serveAssetFile(c, rootTarget, reqPath, projectID)
-		return
-	}
-
-	// Try public/ folder
-	pubTarget := filepath.Join(workspacePath, "public", filepath.Clean(reqPath))
-	if info, err := os.Stat(pubTarget); err == nil && !info.IsDir() {
-		s.serveAssetFile(c, pubTarget, reqPath, projectID)
-		return
-	}
-
-	// 3. Fallbacks for index.html
-	distIndex := filepath.Join(distPath, "index.html")
-	if _, err := os.Stat(distIndex); err == nil {
-		s.serveAssetFile(c, distIndex, "index.html", projectID)
-		return
-	}
-
-	rootIndex := filepath.Join(workspacePath, "index.html")
-	if _, err := os.Stat(rootIndex); err == nil {
-		s.serveAssetFile(c, rootIndex, "index.html", projectID)
-		return
+	// 3. SPA routing fallback to built dist/index.html (NEVER fall back to uncompiled root index.html!)
+	if !strings.Contains(filepath.Base(reqPath), ".") || reqPath == "index.html" {
+		if _, err := os.Stat(distIndex); err == nil {
+			s.serveAssetFile(c, distIndex, "index.html", projectID)
+			return
+		}
 	}
 
 	c.AbortWithStatus(http.StatusNotFound)
