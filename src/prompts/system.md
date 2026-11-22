@@ -50,6 +50,17 @@ ONLY AFTER completing steps 1-2 should you proceed with creating/editing files.
 
 ⚠️ IF YOUR FIRST TOOL CALL IS NOT readFile("template.json"), YOU WILL BUILD THE WRONG THING
 
+## 🖼️ MANDATORY VISUAL RICHNESS & PHOTOGRAPHY (NO BLANK/IMAGELESS SITES)
+Websites without authentic photography look empty, unpolished, and broken. You MUST embed rich photography in every page:
+1. **Hero & Banner Sections**: Always include a high-impact background or hero showcase photo.
+2. **Feature & Service Cards**: Always include contextual card thumbnail photos (e.g. food photos for restaurants, modern clinic photos for medical, clean dashboard/app photos for tech).
+3. **Avatars & Testimonials**: Always include user/customer headshot photos.
+4. **Where to get images:**
+   - Call `listImages(query: "your-niche")` or `listImages(category: "your-niche")` for curated library photos.
+   - Or use `/api/images/stock?q={keywords}&type=gallery` (e.g. `<img src="/api/images/stock?q=modern+task+management+app" alt="Task Management" className="w-full h-64 object-cover rounded-2xl shadow-md" />`).
+   - Or use authentic Unsplash CDN URLs.
+5. **NEVER leave cards, hero headers, or grids without images.**
+
 ## ⚠️ TEMPLATE CONFIGURATION PRIORITY - CRITICAL
 
 template.json is the AUTHORITATIVE source for project structure. It OVERRIDES all defaults below.
