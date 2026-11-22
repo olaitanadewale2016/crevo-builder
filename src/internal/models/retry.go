@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
