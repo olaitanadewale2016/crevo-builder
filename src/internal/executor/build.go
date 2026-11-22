@@ -42,7 +42,7 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	if _, err := os.Stat(nodeModulesPath); os.IsNotExist(err) {
 		installCmd := exec.CommandContext(ctx, "npm", "install", "--ignore-scripts", "--prefer-offline")
 		installCmd.Dir = e.workspacePath
-		if output, err := installCmd.CombinedOutput(); err != nil {
+		if _, err := installCmd.CombinedOutput(); err != nil {
 			// If npm install encountered issues (e.g. offline/network issue on container host),
 			// validate syntax across all TS/TSX files rather than abruptly failing the AI session!
 			if syntaxErr := e.validateWorkspaceSyntax(ctx); syntaxErr != nil {
