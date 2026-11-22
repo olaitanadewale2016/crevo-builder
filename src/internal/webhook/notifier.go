@@ -17,11 +17,12 @@ import (
 
 // WebhookPayload is the JSON payload sent to webhooks
 type WebhookPayload struct {
-	SessionID string      `json:"session_id"`
-	EventID   string      `json:"event_id"` // Unique per event for idempotency
-	EventType string      `json:"event_type"`
-	Data      interface{} `json:"data"`
-	Timestamp time.Time   `json:"timestamp"`
+	SessionID    string      `json:"session_id"`
+	EventID      string      `json:"event_id"` // Unique per event for idempotency
+	EventType    string      `json:"event_type"`
+	Data         interface{} `json:"data"`
+	PusherActive bool        `json:"pusher_active,omitempty"`
+	Timestamp    time.Time   `json:"timestamp"`
 }
 
 // Streamer interface defines methods for streaming events via Pusher and webhooks
@@ -55,18 +56,19 @@ type Streamer interface {
 
 // Notifier sends events to a webhook URL
 type Notifier struct {
-	webhookURL string
-	serverKey  string
-	sessionID  string
-	maxRetries int
-	retryDelay time.Duration
-	client     *http.Client
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	closed     bool
-	mu         sync.Mutex
-	eventQueue chan WebhookPayload
+	webhookURL   string
+	serverKey    string
+	sessionID    string
+	pusherActive bool
+	maxRetries   int
+	retryDelay   time.Duration
+	client       *http.Client
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	closed       bool
+	mu           sync.Mutex
+	eventQueue   chan WebhookPayload
 }
 
 // NewNotifier creates a new webhook notifier with default settings
@@ -194,6 +196,13 @@ func (n *Notifier) send(payload WebhookPayload) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
+// SetPusherActive flags whether Pusher is actively streaming real-time events
+func (n *Notifier) SetPusherActive(active bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.pusherActive = active
+}
+
 // SendDirectly sends a webhook event synchronously, bypassing the async queue.
 // Used for terminal events (complete, error) that must reach the server promptly
 // and should not be blocked by slow or failing events ahead in the queue.
@@ -203,6 +212,7 @@ func (n *Notifier) SendDirectly(eventType string, data interface{}) bool {
 		n.mu.Unlock()
 		return false
 	}
+	pusherActive := n.pusherActive
 	n.mu.Unlock()
 
 	timestamp := time.Now().UTC()
@@ -211,11 +221,12 @@ func (n *Notifier) SendDirectly(eventType string, data interface{}) bool {
 	eventID := hex.EncodeToString(h.Sum(nil))[:32]
 
 	payload := WebhookPayload{
-		SessionID: n.sessionID,
-		EventID:   eventID,
-		EventType: eventType,
-		Data:      data,
-		Timestamp: timestamp,
+		SessionID:    n.sessionID,
+		EventID:      eventID,
+		EventType:    eventType,
+		Data:         data,
+		PusherActive: pusherActive,
+		Timestamp:    timestamp,
 	}
 
 	for attempt := 0; attempt < n.maxRetries; attempt++ {
@@ -247,6 +258,7 @@ func (n *Notifier) queueEvent(eventType string, data interface{}) {
 		n.mu.Unlock()
 		return
 	}
+	pusherActive := n.pusherActive
 	n.mu.Unlock()
 
 	// Generate unique event ID using SHA256 hash of session + event type + timestamp
@@ -257,11 +269,12 @@ func (n *Notifier) queueEvent(eventType string, data interface{}) {
 	eventID := hex.EncodeToString(h.Sum(nil))[:32] // Use first 32 chars (128 bits)
 
 	payload := WebhookPayload{
-		SessionID: n.sessionID,
-		EventID:   eventID,
-		EventType: eventType,
-		Data:      data,
-		Timestamp: timestamp,
+		SessionID:    n.sessionID,
+		EventID:      eventID,
+		EventType:    eventType,
+		Data:         data,
+		PusherActive: pusherActive,
+		Timestamp:    timestamp,
 	}
 
 	select {

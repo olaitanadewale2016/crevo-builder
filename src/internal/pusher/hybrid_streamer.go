@@ -26,6 +26,9 @@ func NewHybridStreamer(pusherClient Client, webhookStreamer webhook.Streamer, ch
 // NewHybridStreamerWithLogger creates a hybrid streamer with debug logging.
 // channelID is used for the Pusher channel name (typically the workspace/project ID).
 func NewHybridStreamerWithLogger(pusherClient Client, webhookStreamer webhook.Streamer, channelID string, logger *logrus.Logger) *HybridStreamer {
+	if n, ok := webhookStreamer.(*webhook.Notifier); ok {
+		n.SetPusherActive(true)
+	}
 	return &HybridStreamer{
 		pusher:  NewPusherStreamerWithLogger(pusherClient, channelID, logger),
 		webhook: webhookStreamer,
