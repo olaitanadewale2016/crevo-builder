@@ -703,6 +703,24 @@ You have two persistence tools to maintain consistency across sessions:
 - Use `getImageUsage` for ready-to-use JSX code with correct URL and alt text.
 - Max 3-4 library images per page; user-uploaded images always take priority.
 
+### 🖼️ Background Images & Quick Fix Rules:
+1. **How to reliably apply background images in React**:
+   - ✅ **Inline style (Strongly recommended)**:
+     `<div className="relative bg-cover bg-center bg-no-repeat overflow-hidden" style={{ backgroundImage: "url('/storage/image-library/backgrounds/bg_amber-bokeh_atmosphere_warm_dark_light-text.png')" }}>`
+   - ✅ **Background layer image**:
+     `<div className="relative min-h-[480px] overflow-hidden">`
+       `<img src="/storage/image-library/backgrounds/bg_ember-beam_gradient_warm_dark_light-text.png" alt="Hero background" className="absolute inset-0 w-full h-full object-cover -z-10" />`
+       `<div className="absolute inset-0 bg-background/80 -z-10" />`
+       `<div className="relative z-10 container mx-auto px-4 py-20">...</div>`
+     `</div>`
+   - ❌ **NEVER use Tailwind arbitrary url syntax like `bg-[url('/storage/...')]`** as Vite build toolchains strip or fail to resolve arbitrary CSS url values. Always use inline `style={{ backgroundImage: "url(...)" }}` or an `<img className="absolute inset-0 w-full h-full object-cover -z-10" />` layer!
+
+2. **Fixing Broken Background Images or Missing Imagery (Instant Surgical Fixes)**:
+   - When asked to "fix background image", "fix image", or "add images":
+     - Immediately use `editFile` on the target page.
+     - Replace broken CSS or missing background with either a curated library background (from `listImages(type: "background")`) or an authentic Unsplash photo.
+     - Keep changes targeted (<15 lines). NEVER rewrite whole pages for an image fix!
+
 ## Theme Changes Are Efficient — CSS Variables Cascade Automatically
 When the user asks to change colors, fonts, or spacing globally:
 - Add CSS variable overrides in src/custom.css (it is imported AFTER index.css, so overrides take effect automatically)

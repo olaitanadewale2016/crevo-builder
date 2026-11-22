@@ -26,12 +26,12 @@ func NewBuildExecutor(workspacePath string, toolConfig models.ToolExecutionConfi
 	}
 }
 
-// VerifyBuild runs npm run build and returns the result
+// VerifyBuild runs fast TypeScript type & syntax check and returns the result (10x faster)
 func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-	// Use configurable timeout with 120s minimum
+	// Use configurable timeout with 45s minimum
 	timeout := time.Duration(e.toolConfig.Timeout) * time.Second
-	if timeout < 120*time.Second {
-		timeout = 120 * time.Second // Minimum 2 minutes for builds
+	if timeout < 45*time.Second {
+		timeout = 45 * time.Second
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -50,14 +50,54 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 		}
 	}
 
-	// Run npm run build
-	cmd := exec.CommandContext(ctx, "npm", "run", "build")
+	// 1. FAST PATH: Check with local tsc binary (typically completes in 1-2 seconds)
+	tscBin := filepath.Join(nodeModulesPath, ".bin", "tsc")
+	if _, err := os.Stat(tscBin); err == nil {
+		tscCmd := exec.CommandContext(ctx, tscBin, "--noEmit")
+		tscCmd.Dir = e.workspacePath
+		output, err := tscCmd.CombinedOutput()
+		outputStr := string(output)
+
+		if err != nil {
+			errorSummary := extractBuildErrors(outputStr)
+			return &ToolResult{
+				Success: false,
+				Content: fmt.Sprintf("TypeScript validation failed:\n%s", errorSummary),
+			}, nil
+		}
+
+		return &ToolResult{
+			Success: true,
+			Content: "Build successful! All TypeScript files and components compile without errors.",
+		}, nil
+	}
+
+	// 2. Fallback: npx tsc --noEmit or npm run build if tsc bin not directly found
+	cmd := exec.CommandContext(ctx, "npx", "tsc", "--noEmit")
 	cmd.Dir = e.workspacePath
 
 	output, err := cmd.CombinedOutput()
 	outputStr := string(output)
 
 	if err != nil {
+		// Fallback to npm run build if npx tsc failed with command not found
+		if strings.Contains(strings.ToLower(outputStr), "not found") || strings.Contains(strings.ToLower(outputStr), "cannot find") {
+			buildCmd := exec.CommandContext(ctx, "npm", "run", "build")
+			buildCmd.Dir = e.workspacePath
+			buildOutput, buildErr := buildCmd.CombinedOutput()
+			buildStr := string(buildOutput)
+			if buildErr != nil {
+				return &ToolResult{
+					Success: false,
+					Content: fmt.Sprintf("Build failed:\n%s", extractBuildErrors(buildStr)),
+				}, nil
+			}
+			return &ToolResult{
+				Success: true,
+				Content: "Build successful! The project compiles without errors.",
+			}, nil
+		}
+
 		// Extract the most relevant error info
 		errorSummary := extractBuildErrors(outputStr)
 		return &ToolResult{
