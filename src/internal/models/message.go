@@ -11,9 +11,10 @@ type Message struct {
 
 // ToolCall represents an AI tool call (simplified)
 type ToolCall struct {
-	ID        string                 `json:"id"`
-	Name      string                 `json:"name"`
-	Arguments map[string]interface{} `json:"arguments"`
+	ID           string                 `json:"id"`
+	Name         string                 `json:"name"`
+	Arguments    map[string]interface{} `json:"arguments"`
+	ExtraContent map[string]interface{} `json:"extra_content,omitempty"`
 }
 
 // Response from AI provider

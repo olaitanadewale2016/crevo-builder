@@ -1,10 +1,13 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"crevo-builder/internal/models"
@@ -16,6 +19,9 @@ import (
 // Client implements AIProvider using OpenAI or compatible APIs
 type Client struct {
 	client      *openai.Client
+	httpClient  *http.Client
+	apiKey      string
+	baseURL     string
 	model       string
 	maxTokens   int
 	logger      *logrus.Logger
@@ -25,6 +31,59 @@ type Client struct {
 
 // Ensure Client implements AIProvider
 var _ models.AIProvider = (*Client)(nil)
+
+type chatRequest struct {
+	Model               string        `json:"model"`
+	Messages            []chatMessage `json:"messages"`
+	Tools               []chatTool    `json:"tools,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+}
+
+type chatMessage struct {
+	Role       string         `json:"role"`
+	Content    *string        `json:"content"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type chatToolCall struct {
+	ID           string                 `json:"id"`
+	Type         string                 `json:"type"`
+	Function     chatFunctionCall       `json:"function"`
+	ExtraContent map[string]interface{} `json:"extra_content,omitempty"`
+}
+
+type chatFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type chatTool struct {
+	Type     string          `json:"type"`
+	Function chatFunctionDef `json:"function"`
+}
+
+type chatFunctionDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Parameters  interface{} `json:"parameters,omitempty"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
+			Role      string         `json:"role"`
+			Content   *string        `json:"content"`
+			ToolCalls []chatToolCall `json:"tool_calls,omitempty"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
 
 // NewClient creates a new OpenAI client (backward compatible)
 func NewClient(apiKey string, model string, maxTokens int) *Client {
@@ -42,21 +101,19 @@ func NewClientWithConfig(cfg models.ProviderConfig, logger *logrus.Logger) *Clie
 
 // NewClientWithRetry creates a client with custom retry configuration
 func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryConfig models.RetryConfig, onRetry models.RetryCallback) *Client {
-	var oaiClient *openai.Client
-
-	var openaiConfig openai.ClientConfig
-	if cfg.BaseURL != "" {
-		// Custom base URL (for compatible APIs)
-		openaiConfig = openai.DefaultConfig(cfg.APIKey)
-		openaiConfig.BaseURL = cfg.BaseURL
-	} else {
-		// Standard OpenAI
-		openaiConfig = openai.DefaultConfig(cfg.APIKey)
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
 	}
-	openaiConfig.HTTPClient = &http.Client{
+
+	httpClient := &http.Client{
 		Timeout: 90 * time.Second,
 	}
-	oaiClient = openai.NewClientWithConfig(openaiConfig)
+
+	openaiConfig := openai.DefaultConfig(cfg.APIKey)
+	openaiConfig.BaseURL = baseURL
+	openaiConfig.HTTPClient = httpClient
+	oaiClient := openai.NewClientWithConfig(openaiConfig)
 
 	model := cfg.Model
 	if model == "" {
@@ -70,6 +127,9 @@ func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryC
 
 	return &Client{
 		client:      oaiClient,
+		httpClient:  httpClient,
+		apiKey:      cfg.APIKey,
+		baseURL:     baseURL,
 		model:       model,
 		maxTokens:   maxTokens,
 		logger:      logger,
@@ -83,7 +143,7 @@ func (c *Client) SetRetryCallback(callback models.RetryCallback) {
 	c.onRetry = callback
 }
 
-// convertMessage converts our Message to OpenAI format
+// convertMessage converts our Message to OpenAI format (for backwards compatibility)
 func (c *Client) convertMessage(msg models.Message) openai.ChatCompletionMessage {
 	m := openai.ChatCompletionMessage{
 		Role:    msg.Role,
@@ -101,18 +161,41 @@ func (c *Client) convertMessage(msg models.Message) openai.ChatCompletionMessage
 
 // Chat sends messages and returns response with potential tool calls
 func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []models.ToolDefinition) (*models.Response, error) {
-	// Convert messages to OpenAI format
-	openaiMessages := make([]openai.ChatCompletionMessage, 0, len(messages))
+	chatMessages := make([]chatMessage, 0, len(messages))
 	for _, msg := range messages {
-		openaiMessages = append(openaiMessages, c.convertMessage(msg))
+		cm := chatMessage{
+			Role: msg.Role,
+		}
+		if msg.Content != "" || (msg.Role != "assistant" && len(msg.ToolCalls) == 0) {
+			cCopy := msg.Content
+			cm.Content = &cCopy
+		}
+		if msg.ToolCallID != "" {
+			cm.ToolCallID = msg.ToolCallID
+		}
+		if len(msg.ToolCalls) > 0 {
+			cm.ToolCalls = make([]chatToolCall, len(msg.ToolCalls))
+			for i, tc := range msg.ToolCalls {
+				argsBytes, _ := json.Marshal(tc.Arguments)
+				cm.ToolCalls[i] = chatToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: chatFunctionCall{
+						Name:      tc.Name,
+						Arguments: string(argsBytes),
+					},
+					ExtraContent: tc.ExtraContent,
+				}
+			}
+		}
+		chatMessages = append(chatMessages, cm)
 	}
 
-	// Convert tools to OpenAI format
-	openaiTools := make([]openai.Tool, len(tools))
+	chatTools := make([]chatTool, len(tools))
 	for i, tool := range tools {
-		openaiTools[i] = openai.Tool{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+		chatTools[i] = chatTool{
+			Type: "function",
+			Function: chatFunctionDef{
 				Name:        tool.Name,
 				Description: tool.Description,
 				Parameters:  tool.Parameters,
@@ -120,14 +203,20 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		}
 	}
 
-	req := openai.ChatCompletionRequest{
+	reqPayload := chatRequest{
 		Model:               c.model,
 		MaxCompletionTokens: c.maxTokens,
-		Messages:            openaiMessages,
-		Tools:               openaiTools,
+		Messages:            chatMessages,
+		Tools:               chatTools,
 	}
 
-	// Log before request
+	reqBodyBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/chat/completions", strings.TrimRight(c.baseURL, "/"))
+
 	if c.logger != nil {
 		c.logger.WithFields(logrus.Fields{
 			"model":      c.model,
@@ -138,15 +227,51 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 
 	startTime := time.Now()
 
-	// Create retry callback that wraps our callback
 	var retryCallback models.RetryCallback
 	if c.onRetry != nil {
 		retryCallback = c.onRetry
 	}
 
-	// Execute with retry logic
-	resp, err := models.RetryWithCallback(ctx, c.retryConfig, func() (openai.ChatCompletionResponse, error) {
-		return c.client.CreateChatCompletion(ctx, req)
+	resp, err := models.RetryWithCallback(ctx, c.retryConfig, func() (chatResponse, error) {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBodyBytes))
+		if reqErr != nil {
+			return chatResponse{}, reqErr
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if c.apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+
+		httpResp, doErr := c.httpClient.Do(httpReq)
+		if doErr != nil {
+			return chatResponse{}, doErr
+		}
+		defer httpResp.Body.Close()
+
+		bodyBytes, readErr := io.ReadAll(httpResp.Body)
+		if readErr != nil {
+			return chatResponse{}, readErr
+		}
+
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			var errObj struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			_ = json.Unmarshal(bodyBytes, &errObj)
+			errMsg := errObj.Error.Message
+			if errMsg == "" {
+				errMsg = string(bodyBytes)
+			}
+			return chatResponse{}, fmt.Errorf("openai error: %d %s", httpResp.StatusCode, errMsg)
+		}
+
+		var cr chatResponse
+		if unmarshalErr := json.Unmarshal(bodyBytes, &cr); unmarshalErr != nil {
+			return chatResponse{}, fmt.Errorf("failed to decode response: %w", unmarshalErr)
+		}
+		return cr, nil
 	}, retryCallback, c.logger)
 
 	duration := time.Since(startTime)
@@ -166,7 +291,6 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		return nil, fmt.Errorf("no response from OpenAI")
 	}
 
-	// Log after response
 	if c.logger != nil {
 		c.logger.WithFields(logrus.Fields{
 			"model":         c.model,
@@ -178,24 +302,28 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 	}
 
 	choice := resp.Choices[0]
+	var respContent string
+	if choice.Message.Content != nil {
+		respContent = *choice.Message.Content
+	}
 	result := &models.Response{
-		Content:          choice.Message.Content,
-		StopReason:       string(choice.FinishReason),
+		Content:          respContent,
+		StopReason:       choice.FinishReason,
 		TokensUsed:       resp.Usage.TotalTokens,
 		PromptTokens:     resp.Usage.PromptTokens,
 		CompletionTokens: resp.Usage.CompletionTokens,
 	}
 
-	// Parse tool calls
 	for _, tc := range choice.Message.ToolCalls {
 		args := make(map[string]interface{})
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 			return nil, fmt.Errorf("failed to parse tool arguments: %w", err)
 		}
 		result.ToolCalls = append(result.ToolCalls, models.ToolCall{
-			ID:        tc.ID,
-			Name:      tc.Function.Name,
-			Arguments: args,
+			ID:           tc.ID,
+			Name:         tc.Function.Name,
+			Arguments:    args,
+			ExtraContent: tc.ExtraContent,
 		})
 	}
 
