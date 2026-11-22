@@ -123,8 +123,8 @@ func (f *Factory) CreateProvider(cfg models.ProviderConfig) (models.AIProvider, 
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
 		}
-		if cfg.Model == "" || cfg.Model == "gemini-2.5-flash" {
-			cfg.Model = "gemini-3.5-flash"
+		if cfg.Model == "" || cfg.Model == "gemini-2.5-flash" || cfg.Model == "gemini-3.5-flash" {
+			cfg.Model = "gemini-3.1-flash-lite"
 		}
 		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 	case ProviderTypeOpenRouter:

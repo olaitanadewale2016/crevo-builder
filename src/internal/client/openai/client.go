@@ -159,6 +159,43 @@ func (c *Client) convertMessage(msg models.Message) openai.ChatCompletionMessage
 	return m
 }
 
+// getModelFallbackPool returns an ordered list of models to try if the primary model fails or hits quota
+func getModelFallbackPool(currentModel string, baseURL string) []string {
+	isGemini := strings.Contains(baseURL, "googleapis.com") || strings.Contains(currentModel, "gemini")
+	isOpenRouter := strings.Contains(baseURL, "openrouter.ai")
+
+	var pool []string
+	if isGemini {
+		pool = []string{
+			"gemini-3.1-flash-lite",
+			"gemini-3-flash-preview",
+			"gemini-2.5-flash-lite",
+			"gemini-3.5-flash",
+			"gemini-2.5-flash",
+			"gemini-2.0-flash",
+		}
+	} else if isOpenRouter {
+		pool = []string{
+			"nvidia/nemotron-3.5-super-vl:free",
+			"google/gemini-2.0-flash-exp:free",
+			"google/gemini-2.0-flash-thinking-exp:free",
+			"openrouter/free",
+			"nvidia/nemotron-3.5-lightning:free",
+			"meta-llama/llama-3.3-70b-instruct:free",
+		}
+	} else {
+		return []string{currentModel}
+	}
+
+	result := []string{currentModel}
+	for _, m := range pool {
+		if m != currentModel {
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
 // Chat sends messages and returns response with potential tool calls
 func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []models.ToolDefinition) (*models.Response, error) {
 	chatMessages := make([]chatMessage, 0, len(messages))
@@ -203,57 +240,89 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		}
 	}
 
-	reqPayload := chatRequest{
-		Model:               c.model,
-		MaxCompletionTokens: c.maxTokens,
-		Messages:            chatMessages,
-		Tools:               chatTools,
-	}
-
-	reqBodyBytes, err := json.Marshal(reqPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize request: %w", err)
-	}
-
+	modelsToTry := getModelFallbackPool(c.model, c.baseURL)
 	endpoint := fmt.Sprintf("%s/chat/completions", strings.TrimRight(c.baseURL, "/"))
-
-	if c.logger != nil {
-		c.logger.WithFields(logrus.Fields{
-			"model":      c.model,
-			"messages":   len(messages),
-			"max_tokens": c.maxTokens,
-		}).Debug("Sending chat request")
-	}
 
 	startTime := time.Now()
 
-	var retryCallback models.RetryCallback
-	if c.onRetry != nil {
-		retryCallback = c.onRetry
-	}
+	var finalResp chatResponse
+	var lastErr error
+	success := false
 
-	resp, err := models.RetryWithCallback(ctx, c.retryConfig, func() (chatResponse, error) {
-		httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBodyBytes))
-		if reqErr != nil {
-			return chatResponse{}, reqErr
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		if c.apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	for modelIdx, candidateModel := range modelsToTry {
+		reqPayload := chatRequest{
+			Model:               candidateModel,
+			MaxCompletionTokens: c.maxTokens,
+			Messages:            chatMessages,
+			Tools:               chatTools,
 		}
 
-		httpResp, doErr := c.httpClient.Do(httpReq)
-		if doErr != nil {
-			return chatResponse{}, doErr
-		}
-		defer httpResp.Body.Close()
-
-		bodyBytes, readErr := io.ReadAll(httpResp.Body)
-		if readErr != nil {
-			return chatResponse{}, readErr
+		reqBodyBytes, err := json.Marshal(reqPayload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize request: %w", err)
 		}
 
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if c.logger != nil {
+			c.logger.WithFields(logrus.Fields{
+				"model":      candidateModel,
+				"messages":   len(messages),
+				"max_tokens": c.maxTokens,
+			}).Debug("Sending chat request")
+		}
+
+		maxAttempts := 3
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+
+			httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBodyBytes))
+			if reqErr != nil {
+				lastErr = reqErr
+				break
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			if c.apiKey != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+			}
+
+			httpResp, doErr := c.httpClient.Do(httpReq)
+			if doErr != nil {
+				lastErr = doErr
+				time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+				continue
+			}
+
+			bodyBytes, readErr := io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
+
+			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				var cr chatResponse
+				if unmarshalErr := json.Unmarshal(bodyBytes, &cr); unmarshalErr != nil {
+					lastErr = fmt.Errorf("failed to decode response: %w", unmarshalErr)
+					continue
+				}
+				finalResp = cr
+				success = true
+				if candidateModel != c.model {
+					if c.logger != nil {
+						c.logger.WithFields(logrus.Fields{
+							"previous_model": c.model,
+							"new_model":      candidateModel,
+						}).Info("Successfully switched to fallback model")
+					}
+					c.model = candidateModel
+				}
+				break
+			}
+
+			// Parse error from upstream
 			var errObj struct {
 				Error struct {
 					Message string `json:"message"`
@@ -264,32 +333,86 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			if errMsg == "" {
 				errMsg = string(bodyBytes)
 			}
-			return chatResponse{}, fmt.Errorf("openai error: %d %s", httpResp.StatusCode, errMsg)
+			lastErr = fmt.Errorf("openai error: %d %s", httpResp.StatusCode, errMsg)
+
+			if c.onRetry != nil {
+				c.onRetry(attempt+1, maxAttempts, time.Second, lastErr)
+			}
+
+			if httpResp.StatusCode == 429 {
+				isDailyQuota := strings.Contains(errMsg, "per day limit") ||
+					strings.Contains(errMsg, "DayPerProject") ||
+					strings.Contains(errMsg, "limit: 20") ||
+					strings.Contains(errMsg, "3h") ||
+					strings.Contains(errMsg, "RESOURCE_EXHAUSTED")
+
+				if isDailyQuota && modelIdx < len(modelsToTry)-1 {
+					if c.logger != nil {
+						c.logger.Warnf("Model %s exhausted daily quota, failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
+					}
+					break
+				}
+
+				// If there's another model in the pool, switch to it immediately instead of waiting
+				if modelIdx < len(modelsToTry)-1 {
+					if c.logger != nil {
+						c.logger.Warnf("Model %s hit rate limit (429), failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
+					}
+					break
+				}
+
+				// If this is the last or only model, wait and retry
+				sleepDuration := time.Duration(12*(attempt+1)) * time.Second
+				if c.logger != nil {
+					c.logger.Warnf("Model %s rate limited. Waiting %v before attempt %d", candidateModel, sleepDuration, attempt+2)
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(sleepDuration):
+				}
+				continue
+			}
+
+			// For 500-504 server overload, try next model if available
+			if httpResp.StatusCode >= 500 && httpResp.StatusCode <= 504 {
+				if modelIdx < len(modelsToTry)-1 {
+					if c.logger != nil {
+						c.logger.Warnf("Model %s returned status %d, trying next model: %s", candidateModel, httpResp.StatusCode, modelsToTry[modelIdx+1])
+					}
+					break
+				}
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+				continue
+			}
+
+			// Fatal errors (400, 401, 403, context length)
+			break
 		}
 
-		var cr chatResponse
-		if unmarshalErr := json.Unmarshal(bodyBytes, &cr); unmarshalErr != nil {
-			return chatResponse{}, fmt.Errorf("failed to decode response: %w", unmarshalErr)
+		if success {
+			break
 		}
-		return cr, nil
-	}, retryCallback, c.logger)
+	}
 
 	duration := time.Since(startTime)
 
-	if err != nil {
+	if !success {
 		if c.logger != nil {
 			c.logger.WithFields(logrus.Fields{
 				"model":    c.model,
 				"duration": fmt.Sprintf("%.2fs", duration.Seconds()),
-				"error":    err.Error(),
+				"error":    lastErr.Error(),
 			}).Debug("AI request failed")
 		}
-		return nil, fmt.Errorf("openai error: %w", err)
+		return nil, fmt.Errorf("openai error: %w", lastErr)
 	}
 
-	if len(resp.Choices) == 0 {
+	if len(finalResp.Choices) == 0 {
 		return nil, fmt.Errorf("no response from OpenAI")
 	}
+
+	resp := finalResp
 
 	if c.logger != nil {
 		c.logger.WithFields(logrus.Fields{

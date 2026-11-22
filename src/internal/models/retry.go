@@ -112,6 +112,12 @@ func RetryWithCallback[T any](
 
 		// Calculate delay with exponential backoff and jitter
 		delay := calculateDelay(cfg, attempt)
+		if strings.Contains(strings.ToLower(err.Error()), "429") || strings.Contains(strings.ToLower(err.Error()), "rate limit") {
+			rateLimitMin := time.Duration(2*(attempt+1)) * time.Second
+			if delay < rateLimitMin {
+				delay = rateLimitMin
+			}
+		}
 
 		// Call retry callback if provided
 		if onRetry != nil {
