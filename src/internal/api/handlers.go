@@ -1206,6 +1206,17 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 		}
 	}
 
+	// Pre-warm node_modules in background while AI runs so build finishes in ~1.5s
+	go func(wPath string) {
+		bgCtx, bgCancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer bgCancel()
+		if err := executor.EnsureSharedNodeModules(bgCtx, wPath); err != nil {
+			s.logger.WithError(err).Warn("Background EnsureSharedNodeModules pre-warming failed")
+		} else {
+			s.logger.WithField("workspace", wPath).Debug("node_modules pre-warmed successfully")
+		}
+	}(workspacePath)
+
 	// Convert history to runner format with compaction metadata
 	runnerHistory := agent.HistoryInput{
 		Messages:    make([]agent.HistoryMsg, len(history)),
