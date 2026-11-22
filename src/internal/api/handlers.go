@@ -818,6 +818,17 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 
 	projectID := extractProjectID(workspaceID)
 
+	// Redirect stock image library requests to Next.js /storage/image-library/ where files reside
+	baseName := filepath.Base(reqPath)
+	if strings.HasPrefix(baseName, "bg_") {
+		c.Redirect(http.StatusFound, "/storage/image-library/backgrounds/"+baseName)
+		return
+	}
+	if strings.HasPrefix(baseName, "gal_") {
+		c.Redirect(http.StatusFound, "/storage/image-library/gallery/"+baseName)
+		return
+	}
+
 	// 1. Look in dist folder first (if built)
 	distPath := filepath.Join(workspacePath, "dist")
 	targetFile := filepath.Join(distPath, filepath.Clean(reqPath))
