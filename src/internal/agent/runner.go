@@ -341,15 +341,11 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		}
 	}
 
-	// Load template prompts and metadata from workspace (only if a template is already present)
-	// When no template is pre-selected, the AI will call useTemplate during the agent loop,
-	// so template.json won't exist yet — skip the unnecessary file read.
-	var templatePrompts *models.TemplatePrompts
-	var templateMetadata *models.TemplateMetadata
-	if session.GetSelectedTemplate() != "" {
-		templatePrompts = r.loadTemplatePrompts(r.executor.GetWorkspacePath())
-		templateMetadata = r.loadTemplateMetadata(r.executor.GetWorkspacePath())
-	}
+	// Load template prompts and metadata from workspace whenever template.json exists
+	// (loadTemplatePrompts/loadTemplateMetadata return nil safely on empty workspaces)
+	workspaceDir := r.executor.GetWorkspacePath()
+	templatePrompts := r.loadTemplatePrompts(workspaceDir)
+	templateMetadata := r.loadTemplateMetadata(workspaceDir)
 
 	// Calculate token budget for the system prompt (reserve ~60% for history + response)
 	tokenBudget := 0

@@ -35,16 +35,18 @@ When you receive ANY request, you MUST follow this EXACT sequence:
 - See what content exists that you may need to REPLACE or ADD TO
 - Do NOT read unrelated pages — loading them into context risks accidental modifications
 
-**STEP 3: Decide WHERE to add content (based on template.json guidance)**
-- If user says "make/create/build X" (tool, app, generator, calculator, manager, tracker, etc.) → REPLACE Home.tsx content with the new app (single-purpose app)
-- If user says "add X" (no "page" keyword) → ADD TO the home page as a new section
-- If user says "X page" or "create a page" → Create new file in template's pages_dir
+**STEP 3: Classify the Request & Decide Scope BEFORE Editing**
+Check whether the workspace already has a customized website (`src/pages/Home.tsx` already customized beyond the generic starter) OR is a fresh build:
+- **First Build (fresh starter) OR explicit "start over / build from scratch"**: Replace `Home.tsx` cleanly and design the complete site with a cohesive visual concept (custom palette in `src/custom.css`, sticky navbar, multi-column footer).
+- **Existing Website + Targeted Change / Fix / Style Tweaks** (e.g., "change the hero title", "make buttons rounded", "fix the header spacing", "use warmer colors"): NEVER redesign or wipe the existing website! Use `editFile` surgically on only the affected lines/styles while preserving the existing layout, brand, sections, and components.
+- **Existing Website + Add Section** (e.g., "add pricing", "add FAQ", without saying "page"): Keep all existing sections intact and insert the new section matching the established design system (`readDesignIntelligence`).
+- **Existing Website + Add Page** (e.g., "add an About page"): Create the new page in `pages_dir` and register it in `src/routes.tsx` without modifying existing pages.
 
-🚨 SINGLE-PURPOSE APP RULE (READ template.json's usage_examples.single_purpose_app):
-When user requests "make a task manager", "create a recipe generator", "build a calculator", etc.:
+🚨 SINGLE-PURPOSE APP RULE (Applies ONLY on First Build or when user explicitly asks to rebuild):
+When user starts a fresh project asking to "make a task manager", "create a recipe generator", "build a calculator", etc.:
 - The Home page IS the app
 - Do NOT create a separate page like TaskManager.tsx or RecipeGenerator.tsx
-- REPLACE the content in Home.tsx with your new app
+- Build it in `Home.tsx` on the initial build; on follow-up edits, modify `Home.tsx` surgically with `editFile`.
 
 ONLY AFTER completing steps 1-2 should you proceed with creating/editing files.
 
@@ -743,15 +745,24 @@ Example custom.css override for warm colors:
 .dark { --primary: 20 90% 48%; --accent: 28 90% 40%; }
 ```
 
-## TEMPLATE SELECTION
-- If a template was pre-selected (mentioned in the goal), read template.json and proceed
-- If NO template was pre-selected:
-  1. Call fetchTemplates to see all available templates with their categories
+## DESIGN CONCEPT & CHANGE CLASSIFICATION (CRITICAL)
+Before calling any tool, understand both the site's **design concept** and the **exact scope of change**:
+1. **First Build (fresh starter workspace)**:
+   - Choose a cohesive visual concept tailored to the business/audience (color mood & contrast, display + body font pairing in `index.html`/`src/custom.css`, spacing rhythm, border radius style).
+   - Put brand color/typography tokens in `src/custom.css` (never edit `src/index.css`) and record business facts (`updateSiteMemory`) and visual decisions (`writeDesignIntelligence`).
+2. **Follow-Up Messages (existing website already built)**:
+   - Call `readSiteMemory` and `readDesignIntelligence` FIRST so you stay aligned with the brand name, palette, typography, and layout decisions.
+   - **Targeted Edit / Fix / Section Add**: Use `readFile` on ONLY the relevant existing file(s) (`src/pages/Home.tsx`, `src/custom.css`, mentioned component/page) and apply minimal `editFile` patches. Preserve the existing header, footer, sections, and overall app design.
+   - **Style / Theme Change**: Override CSS variables in `src/custom.css` and adjust classes without rewriting working sections.
+   - **Full Redesign**: ONLY redesign or replace the whole app if the user explicitly asks to "start over", "redesign the whole site", or "build something completely different instead".
+
+## TEMPLATE SELECTION (FRESH EMPTY WORKSPACE ONLY)
+- If `src/` or `template.json` ALREADY exists (including any follow-up prompt or pre-selected template): **NEVER** call `fetchTemplates` or `useTemplate` — doing so would erase existing work! Read `template.json` / existing files and continue.
+- ONLY when the workspace is empty (`src/` does not exist) and NO template was pre-selected:
+  1. Call `fetchTemplates` to see all available templates with their categories
   2. Analyze the user's goal and match it to the best template by name, description, and category
-  3. Call useTemplate to apply the chosen template
-  4. Then read template.json and proceed
-- Do this BEFORE creating or editing any files
-- NEVER skip template selection — always ensure you're using the best template for the goal
+  3. Call `useTemplate` to apply the chosen template
+  4. Then read `template.json` and proceed
 
 ## Layout Enforcement — CRITICAL
 - The Layout component wraps routes that use `layout: 'default'` inside `App.tsx`

@@ -317,6 +317,12 @@ func (e *Executor) executeTool(ctx context.Context, toolName string, args map[st
 		if e.template == nil {
 			return nil, fmt.Errorf("template support not configured")
 		}
+		if workspaceHasCustomizedApp(e.file.workspacePath) {
+			return &ToolResult{
+				Success: false,
+				Content: "Workspace already contains an existing customized website. NEVER call useTemplate on an existing website — use readFile and editFile to make targeted changes instead.",
+			}, nil
+		}
 		templateID, _ := args["template"].(string)
 		err := e.template.UseTemplate(ctx, e.file.workspacePath, templateID)
 		if err == nil {
@@ -870,4 +876,30 @@ func generateThemeCSSBlock(vars map[string]string) string {
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// workspaceHasCustomizedApp returns true when the workspace already contains a customized
+// application beyond the unedited starter template, preventing accidental wipes via useTemplate.
+func workspaceHasCustomizedApp(workspacePath string) bool {
+	pagesDir := filepath.Join(workspacePath, "src", "pages")
+	entries, err := os.ReadDir(pagesDir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasSuffix(name, ".tsx") && name != "Home.tsx" && name != "NotFound.tsx" {
+				return true
+			}
+		}
+	}
+
+	homePath := filepath.Join(pagesDir, "Home.tsx")
+	data, err := os.ReadFile(homePath)
+	if err != nil {
+		return false
+	}
+	content := string(data)
+	return strings.TrimSpace(content) != "" && !strings.Contains(content, "Welcome to Your Website")
 }

@@ -569,7 +569,7 @@ func (s *Server) handleUpdateFile(c *gin.Context) {
 		return
 	}
 
-	workspacePath, _, ok := s.resolveWorkspaceFromRequest(c)
+	workspacePath, workspaceID, ok := s.resolveWorkspaceFromRequest(c)
 	if !ok {
 		return
 	}
@@ -587,6 +587,9 @@ func (s *Server) handleUpdateFile(c *gin.Context) {
 		return
 	}
 
+	revMgr := s.getOrCreateRevisionManager(workspaceID)
+	_ = revMgr.EnsureBaselineSnapshot("Before manual file edit")
+
 	// Ensure directory exists
 	_ = os.MkdirAll(filepath.Dir(fullPath), 0755)
 
@@ -594,6 +597,8 @@ func (s *Server) handleUpdateFile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
 		return
 	}
+
+	_, _ = revMgr.CreateSnapshotIfChanged("Edit: " + filepath.Base(req.Path))
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
@@ -627,6 +632,9 @@ func (s *Server) handleApplyTheme(c *gin.Context) {
 		return
 	}
 
+	revMgr := s.getOrCreateRevisionManager(workspaceID)
+	_ = revMgr.EnsureBaselineSnapshot("Before theme update")
+
 	// Apply theme by replacing :root and .dark blocks
 	newContent := applyThemeToCSS(string(content), req.Light, req.Dark)
 
@@ -635,6 +643,8 @@ func (s *Server) handleApplyTheme(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to write CSS"})
 		return
 	}
+
+	_, _ = revMgr.CreateSnapshotIfChanged("Theme update")
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
@@ -678,7 +688,7 @@ func (s *Server) handleBuild(c *gin.Context) {
 	s.runBuildInWorkspace(c, workspacePath)
 }
 
-// isDistUpToDate returns true if dist/index.html exists and is newer than all source files in src/
+// isDistUpToDate returns true if dist/index.html exists and is newer than all source files in src/ and root index.html
 func isDistUpToDate(workspacePath string) bool {
 	distIndex := filepath.Join(workspacePath, "dist", "index.html")
 	distInfo, err := os.Stat(distIndex)
@@ -686,6 +696,10 @@ func isDistUpToDate(workspacePath string) bool {
 		return false
 	}
 	distTime := distInfo.ModTime()
+
+	if idxInfo, err := os.Stat(filepath.Join(workspacePath, "index.html")); err == nil && idxInfo.ModTime().After(distTime) {
+		return false
+	}
 
 	srcDir := filepath.Join(workspacePath, "src")
 	upToDate := true
@@ -1162,7 +1176,8 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 	// Initialize workspace from template BEFORE starting agent
 	// If workspace is empty, pre-initialize with selected template or default starter template
 	workspacePath := session.GetWorkspacePath()
-	if !workspaceHasFiles(workspacePath) {
+	hadFilesBeforeRun := workspaceHasFiles(workspacePath)
+	if !hadFilesBeforeRun {
 		templateToUse := selectedTemplate
 		if templateToUse == "" {
 			templateToUse = "default"
@@ -1201,9 +1216,11 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 		}
 	}
 
-	// Update goal to inform AI about template selection state
+	// Update goal to inform AI about workspace / template selection state
 	initialGoal := goal
-	if selectedTemplate != "" {
+	if hadFilesBeforeRun {
+		initialGoal = fmt.Sprintf("%s\n\n(Note: This workspace ALREADY contains an existing website. Do NOT call fetchTemplates or useTemplate. Call readDesignIntelligence/readSiteMemory and readFile on the relevant existing files first, preserve the existing app, brand, and design system, and apply targeted editFile changes unless the user explicitly asks to start over or rebuild from scratch.)", goal)
+	} else if selectedTemplate != "" {
 		templateName := session.GetSelectedTemplateName()
 		if templateName == "" {
 			templateName = selectedTemplate // Fall back to ID if name not provided
@@ -1232,11 +1249,20 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 		cfg.Tools,   // tool config for timeout and retry
 	)
 
-	// Create revision snapshot before running the agent
+	// Capture baseline snapshot before running the agent (or any out-of-band edit since last snapshot)
 	revMgr := s.getOrCreateRevisionManager(session.WorkspaceID)
-	if err := revMgr.CreateSnapshot(fmt.Sprintf("Before: %s", truncateLabel(goal, 60))); err != nil {
-		s.logger.WithField("error", err.Error()).Warn("Failed to create revision snapshot (non-blocking)")
+	if err := revMgr.EnsureBaselineSnapshot(fmt.Sprintf("Before: %s", truncateLabel(goal, 60))); err != nil {
+		s.logger.WithField("error", err.Error()).Warn("Failed to ensure baseline revision snapshot (non-blocking)")
 	}
+
+	// Capture post-run state after agent completes so Undo/Redo steps cleanly between builds
+	defer func() {
+		if created, snapErr := revMgr.CreateSnapshotIfChanged(fmt.Sprintf("After: %s", truncateLabel(goal, 60))); snapErr != nil {
+			s.logger.WithField("error", snapErr.Error()).Warn("Failed to create post-build revision snapshot (non-blocking)")
+		} else if created {
+			s.logger.WithField("workspace_id", session.WorkspaceID).Debug("Saved post-build revision snapshot")
+		}
+	}()
 
 	// Run the agent
 	if err := runner.Run(ctx, session, initialGoal, runnerHistory, maxIterations); err != nil {
@@ -1289,13 +1315,26 @@ func (s *Server) handleUndo(c *gin.Context) {
 	mgr := s.getOrCreateRevisionManager(workspaceID)
 	info, err := mgr.Undo()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": err.Error()})
+		pointer, total, canUndo, canRedo := mgr.Status()
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success":  false,
+			"error":    err.Error(),
+			"current":  pointer,
+			"total":    total,
+			"can_undo": canUndo,
+			"can_redo": canRedo,
+		})
 		return
 	}
 
+	pointer, total, canUndo, canRedo := mgr.Status()
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
 		"revision": info,
+		"current":  pointer,
+		"total":    total,
+		"can_undo": canUndo,
+		"can_redo": canRedo,
 	})
 }
 
@@ -1309,13 +1348,26 @@ func (s *Server) handleRedo(c *gin.Context) {
 	mgr := s.getOrCreateRevisionManager(workspaceID)
 	info, err := mgr.Redo()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": err.Error()})
+		pointer, total, canUndo, canRedo := mgr.Status()
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success":  false,
+			"error":    err.Error(),
+			"current":  pointer,
+			"total":    total,
+			"can_undo": canUndo,
+			"can_redo": canRedo,
+		})
 		return
 	}
 
+	pointer, total, canUndo, canRedo := mgr.Status()
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
 		"revision": info,
+		"current":  pointer,
+		"total":    total,
+		"can_undo": canUndo,
+		"can_redo": canRedo,
 	})
 }
 
@@ -1328,10 +1380,14 @@ func (s *Server) handleListRevisions(c *gin.Context) {
 
 	mgr := s.getOrCreateRevisionManager(workspaceID)
 	revisions, pointer := mgr.List()
+	_, total, canUndo, canRedo := mgr.Status()
 
 	c.JSON(http.StatusOK, gin.H{
 		"revisions": revisions,
 		"current":   pointer,
+		"total":     total,
+		"can_undo":  canUndo,
+		"can_redo":  canRedo,
 	})
 }
 
@@ -1392,7 +1448,7 @@ func (s *Server) handleRecover(c *gin.Context) {
 
 // handleClassEdit performs className-aware search/replace in TSX files
 func (s *Server) handleClassEdit(c *gin.Context) {
-	workspacePath, _, ok := s.resolveWorkspaceFromRequest(c)
+	workspacePath, workspaceID, ok := s.resolveWorkspaceFromRequest(c)
 	if !ok {
 		return
 	}
@@ -1433,11 +1489,16 @@ func (s *Server) handleClassEdit(c *gin.Context) {
 		return
 	}
 
+	revMgr := s.getOrCreateRevisionManager(workspaceID)
+	_ = revMgr.EnsureBaselineSnapshot("Before visual style edit")
+
 	newContent := strings.Replace(fileStr, oldPattern, newPattern, 1)
 	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write file"})
 		return
 	}
+
+	_, _ = revMgr.CreateSnapshotIfChanged("Visual style edit: " + filepath.Base(req.Path))
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "replacements": 1})
 }
