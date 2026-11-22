@@ -225,13 +225,16 @@ func (e *TemplateExecutor) extractZip(zipPath, destDir string) error {
 
 	// Extract files
 	for _, f := range r.File {
+		// Normalize Windows backslash paths inside ZIP entries before creating Linux paths
+		entryName := strings.ReplaceAll(f.Name, "\\", "/")
+
 		// Skip node_modules and dist - they should be generated fresh
-		if containsPathSegment(f.Name, "node_modules") || containsPathSegment(f.Name, "dist") || filepath.Base(f.Name) == "package-lock.json" {
+		if containsPathSegment(entryName, "node_modules") || containsPathSegment(entryName, "dist") || filepath.Base(filepath.FromSlash(entryName)) == "package-lock.json" {
 			continue
 		}
 
 		// Build destination path
-		destPath := filepath.Join(destDir, f.Name)
+		destPath := filepath.Join(destDir, filepath.FromSlash(entryName))
 
 		// Zip slip protection: ensure extracted path stays within destDir
 		if !strings.HasPrefix(filepath.Clean(destPath), filepath.Clean(destDir)+string(os.PathSeparator)) {
@@ -239,8 +242,8 @@ func (e *TemplateExecutor) extractZip(zipPath, destDir string) error {
 		}
 
 		// Create directory
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(destPath, f.Mode()); err != nil {
+		if strings.HasSuffix(entryName, "/") || f.FileInfo().IsDir() {
+			if err := os.MkdirAll(destPath, 0755); err != nil {
 				return err
 			}
 			continue

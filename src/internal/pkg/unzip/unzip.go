@@ -28,8 +28,9 @@ func Extract(src, dest string) error {
 
 	// Extract each file
 	for _, f := range r.File {
-		// Build the full path for this file
-		path := filepath.Join(dest, f.Name)
+		// Normalize Windows backslash paths inside ZIP entries before creating Linux paths
+		entryName := strings.ReplaceAll(f.Name, "\\", "/")
+		path := filepath.Join(dest, filepath.FromSlash(entryName))
 
 		// Security check: ensure the path is within the destination directory
 		// This prevents ZipSlip attacks
@@ -37,9 +38,9 @@ func Extract(src, dest string) error {
 			return fmt.Errorf("invalid file path (ZipSlip detected): %s", f.Name)
 		}
 
-		if f.FileInfo().IsDir() {
+		if strings.HasSuffix(entryName, "/") || f.FileInfo().IsDir() {
 			// Create directory
-			if err := os.MkdirAll(path, f.Mode()); err != nil {
+			if err := os.MkdirAll(path, 0755); err != nil {
 				return fmt.Errorf("creating directory %s: %w", path, err)
 			}
 			continue

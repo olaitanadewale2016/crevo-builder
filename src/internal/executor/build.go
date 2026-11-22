@@ -32,9 +32,12 @@ func NewBuildExecutor(workspacePath string, toolConfig models.ToolExecutionConfi
 // EnsureSharedNodeModules copies the shared node_modules cache using zero-space hardlinks (cp -al)
 // or installs once and populates the shared cache. Avoids directory symlinks which break Node/Vite realpath resolution.
 func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
+	if absWS, err := filepath.Abs(workspacePath); err == nil {
+		workspacePath = absWS
+	}
 	nodeModulesPath := filepath.Join(workspacePath, "node_modules")
 
-	// If node_modules is an old symlink from a previous build, remove the symlink so real directories are used
+	// If node_modules is an old symlink or broken partial dir (missing .bin/vite), remove it so cp -al never nests
 	if info, err := os.Lstat(nodeModulesPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
 			_ = os.Remove(nodeModulesPath)
@@ -43,6 +46,7 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 			if _, vErr := os.Stat(viteBin); vErr == nil {
 				return nil
 			}
+			_ = os.RemoveAll(nodeModulesPath)
 		}
 	}
 
@@ -86,10 +90,13 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	return nil
 }
 
-// resolveToolCommand prefers workspace local .bin, then global PATH binary (zero npx overhead), then npx fallback.
-func resolveToolCommand(workspacePath, tool string) (string, []string) {
+// ResolveToolCommand prefers absolute workspace local .bin, then global PATH binary (zero npx overhead), then npx fallback.
+func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 	localBin := filepath.Join(workspacePath, "node_modules", ".bin", tool)
-	if _, err := os.Stat(localBin); err == nil {
+	if absBin, err := filepath.Abs(localBin); err == nil {
+		localBin = absBin
+	}
+	if info, err := os.Stat(localBin); err == nil && !info.IsDir() {
 		return localBin, nil
 	}
 	if globalBin, err := exec.LookPath(tool); err == nil {
@@ -118,7 +125,7 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	}
 
 	// Run fast Vite build directly (skips slow 25s tsc -b pass while bundling production dist/ with esbuild in ~2s)
-	bin, prefix := resolveToolCommand(e.workspacePath, "vite")
+	bin, prefix := ResolveToolCommand(e.workspacePath, "vite")
 	cmdArgs := append(prefix, "build", "--logLevel", "error")
 	viteCmd := exec.CommandContext(ctx, bin, cmdArgs...)
 	viteCmd.Dir = e.workspacePath
@@ -137,6 +144,9 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 
 	// Return clear error summary so AI can fix any broken import or syntax error immediately
 	errorSummary := extractBuildErrors(outputStr)
+	if strings.TrimSpace(errorSummary) == "" && viteErr != nil {
+		errorSummary = viteErr.Error()
+	}
 
 	return &ToolResult{
 		Success: false,
@@ -163,7 +173,7 @@ func (e *BuildExecutor) validateWorkspaceSyntax(ctx context.Context) error {
 			if ext == ".ts" {
 				loader = "ts"
 			}
-			bin, prefix := resolveToolCommand(e.workspacePath, "esbuild")
+			bin, prefix := ResolveToolCommand(e.workspacePath, "esbuild")
 			cmdArgs := append(prefix, relPath, fmt.Sprintf("--loader:%s=%s", ext[1:], loader), "--outfile=/dev/null")
 			cmd := exec.CommandContext(ctx, bin, cmdArgs...)
 			cmd.Dir = e.workspacePath

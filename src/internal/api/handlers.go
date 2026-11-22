@@ -46,17 +46,21 @@ type Server struct {
 
 // NewServer creates a new server instance
 func NewServer(cfg ServerConfig, logger *logrus.Logger) *Server {
-	// Ensure workspace directory exists
-	_ = os.MkdirAll(cfg.WorkspacePath, 0755)
+	// Normalize workspacePath to an absolute path so child commands with cmd.Dir resolve binaries reliably
+	workspacePath := cfg.WorkspacePath
+	if absPath, err := filepath.Abs(workspacePath); err == nil {
+		workspacePath = absPath
+	}
+	_ = os.MkdirAll(workspacePath, 0755)
 
 	s := &Server{
 		sessions:         make(map[string]*agent.Session),
 		revisionManagers: make(map[string]*revision.Manager),
-		serverKey:     cfg.ServerKey,
-		workspacePath: cfg.WorkspacePath,
-		version:       cfg.Version,
-		logger:        logger,
-		debug:         cfg.Debug,
+		serverKey:        cfg.ServerKey,
+		workspacePath:    workspacePath,
+		version:          cfg.Version,
+		logger:           logger,
+		debug:            cfg.Debug,
 	}
 
 	s.router = s.SetupRouter()
@@ -726,20 +730,14 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	}
 
 	// Run direct Vite build (skips slow tsc pass)
-	viteBin := filepath.Join(workspacePath, "node_modules", ".bin", "vite")
-	var buildCmd *exec.Cmd
-	if _, err := os.Stat(viteBin); err == nil {
-		buildCmd = exec.CommandContext(c.Request.Context(), viteBin, "build", "--logLevel", "error")
-	} else if globalVite, err := exec.LookPath("vite"); err == nil {
-		buildCmd = exec.CommandContext(c.Request.Context(), globalVite, "build", "--logLevel", "error")
-	} else {
-		buildCmd = exec.CommandContext(c.Request.Context(), "npx", "vite", "build", "--logLevel", "error")
-	}
+	bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
+	cmdArgs := append(prefix, "build", "--logLevel", "error")
+	buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
 	buildCmd.Dir = workspacePath
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		s.logger.WithField("output", string(output)).WithError(err).Error("vite build failed")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: fmt.Sprintf("vite build failed: %s", string(output)),
+			Error: fmt.Sprintf("vite build failed (%v): %s", err, string(output)),
 		})
 		return
 	}
@@ -870,17 +868,13 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 		pkgJSON := filepath.Join(workspacePath, "package.json")
 		if _, pkgErr := os.Stat(pkgJSON); pkgErr == nil {
 			if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err == nil {
-				viteBin := filepath.Join(workspacePath, "node_modules", ".bin", "vite")
-				var buildCmd *exec.Cmd
-				if _, vErr := os.Stat(viteBin); vErr == nil {
-					buildCmd = exec.CommandContext(c.Request.Context(), viteBin, "build", "--logLevel", "error")
-				} else if globalVite, vErr := exec.LookPath("vite"); vErr == nil {
-					buildCmd = exec.CommandContext(c.Request.Context(), globalVite, "build", "--logLevel", "error")
-				} else {
-					buildCmd = exec.CommandContext(c.Request.Context(), "npx", "vite", "build", "--logLevel", "error")
-				}
+				bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
+				cmdArgs := append(prefix, "build", "--logLevel", "error")
+				buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
 				buildCmd.Dir = workspacePath
-				_ = buildCmd.Run()
+				if bOut, bErr := buildCmd.CombinedOutput(); bErr != nil {
+					s.logger.WithError(bErr).WithField("output", string(bOut)).Warn("on-the-fly vite build failed in handlePreviewAsset")
+				}
 			}
 		}
 	}
