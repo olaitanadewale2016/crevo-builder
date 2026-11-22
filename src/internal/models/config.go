@@ -43,7 +43,7 @@ func (c *RequestConfig) Validate() error {
 		case "abhibots":
 			c.Agent.Model = "claude-sonnet-5"
 		case "gemini":
-			c.Agent.Model = "gemini-3.5-flash"
+			c.Agent.Model = "gemini-2.5-flash"
 		case "openrouter":
 			c.Agent.Model = "openrouter/free"
 		case "zhipu":
@@ -58,9 +58,6 @@ func (c *RequestConfig) Validate() error {
 	}
 	if c.Agent.MaxTokens == 0 {
 		c.Agent.MaxTokens = 16384
-	}
-	if c.Agent.ReasoningEffort == "" {
-		c.Agent.ReasoningEffort = "medium"
 	}
 	// Token-aware context defaults (provider-specific)
 	if c.Agent.ContextWindow == 0 {
