@@ -884,9 +884,13 @@ Use these instead of placeholder images or external hotlinks.
 					"description": "Filter by image type: 'background' or 'gallery'. Omit for both.",
 					"enum":        []string{"background", "gallery"},
 				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Free-form search keywords or topic (e.g., 'dentist', 'gym fitness', 'lawyer', 'auto repair', 'pet clinic', 'modern tech saas')",
+				},
 				"category": map[string]interface{}{
 					"type":        "string",
-					"description": "Filter by category (e.g., 'texture', 'food', 'wellness', 'architecture')",
+					"description": "Filter by category or industry (e.g., 'dentist', 'fitness', 'law', 'automotive', 'pets', 'food', 'texture')",
 				},
 				"mood": map[string]interface{}{
 					"type":        "string",

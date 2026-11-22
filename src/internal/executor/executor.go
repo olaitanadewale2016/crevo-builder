@@ -2,7 +2,10 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -722,10 +725,14 @@ func (e *Executor) createPlan(ctx context.Context, args map[string]interface{}) 
 	return &ToolResult{Success: true, Content: sb.String()}, nil
 }
 
-// listImages searches the stock image library
+// listImages searches the stock image library or queries the dynamic stock image engine
 func (e *Executor) listImages(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
 	imageType, _ := args["type"].(string)
 	category, _ := args["category"].(string)
+	query, _ := args["query"].(string)
+	if category == "" && query != "" {
+		category = query
+	}
 	mood, _ := args["mood"].(string)
 	tone, _ := args["tone"].(string)
 	limit := 10
@@ -737,6 +744,75 @@ func (e *Executor) listImages(ctx context.Context, args map[string]interface{}) 
 	}
 
 	results := registry.SearchImages(imageType, category, mood, tone, limit)
+
+	// If no local or curated match was found and laravelURL is set, query the Next.js /api/images/stock endpoint
+	if len(results) == 0 && category != "" && e.laravelURL != "" {
+		apiURL := fmt.Sprintf("%s/api/images/stock?q=%s&type=%s&format=json&limit=%d",
+			strings.TrimRight(e.laravelURL, "/"),
+			url.QueryEscape(category),
+			url.QueryEscape(imageType),
+			limit,
+		)
+		req, reqErr := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if reqErr == nil {
+			client := &http.Client{Timeout: 4 * time.Second}
+			resp, doErr := client.Do(req)
+			if doErr == nil && resp.StatusCode == http.StatusOK {
+				defer resp.Body.Close()
+				var apiResp struct {
+					Success bool `json:"success"`
+					Images  []struct {
+						Filename string `json:"filename"`
+						URL      string `json:"url"`
+						Type     string `json:"type"`
+						Subject  string `json:"subject"`
+						Category string `json:"category"`
+						Tone     string `json:"tone"`
+						Contrast string `json:"contrast"`
+						Alt      string `json:"alt"`
+					} `json:"images"`
+				}
+				if jsonErr := json.NewDecoder(resp.Body).Decode(&apiResp); jsonErr == nil && len(apiResp.Images) > 0 {
+					for _, item := range apiResp.Images {
+						imgUrl := item.URL
+						if imgUrl == "" {
+							imgUrl = item.Filename
+						}
+						results = append(results, registry.ImageEntry{
+							Filename: imgUrl,
+							Type:     item.Type,
+							Subject:  item.Subject,
+							Category: item.Category,
+							Tone:     item.Tone,
+							Contrast: item.Contrast,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Dynamic fallback if still empty: generate dynamic image endpoint URL
+	if len(results) == 0 && category != "" {
+		dynType := imageType
+		if dynType == "" {
+			dynType = "gallery"
+		}
+		dynURL := fmt.Sprintf("%s/api/images/stock?q=%s&type=%s",
+			strings.TrimRight(e.laravelURL, "/"),
+			url.QueryEscape(category),
+			dynType,
+		)
+		results = append(results, registry.ImageEntry{
+			Filename: dynURL,
+			Type:     dynType,
+			Subject:  category,
+			Category: category,
+			Tone:     "light",
+			Contrast: "dark-text",
+		})
+	}
+
 	return &ToolResult{
 		Success: true,
 		Content: registry.FormatImageList(results, e.laravelURL),

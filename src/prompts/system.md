@@ -684,11 +684,13 @@ You have two persistence tools to maintain consistency across sessions:
 - This creates llms.txt, robots.txt, and JSON-LD — making the site discoverable by AI search engines
 - Do this automatically at the end of a build, no need to ask the user
 
-**Stock Image Library:**
-- Use listImages to find professional stock photos instead of placeholder images
-- Match image tone to site color scheme (warm site → warm-tone images, cool site → cool-tone images)
-- Use getImageUsage for ready-to-use JSX code with correct URL and alt text
-- Max 3-4 library images per page; user-uploaded images always take priority
+**Stock Image Library & Dynamic Contextual Photography:**
+- Always use professional, authentic photography for every website you build (Hero backgrounds, service cards, testimonials, gallery sections). NEVER use empty placeholder rectangles or broken image links.
+- Use `listImages(category: "your-niche", type: "gallery")` or `listImages(query: "your-niche")` to find relevant photos. The system includes built-in curated photography across 50+ industries (dentistry, healthcare, legal, fitness, automotive, SaaS/tech, pets/veterinary, real estate, plumbing/trades, salon/beauty, restaurants, cleaning, education, travel, etc.).
+- If you need a specific image, you can use the URL returned by `listImages`, or use the dynamic endpoint: `/api/images/stock?q={keywords}&type=gallery` (e.g., `<img src="/api/images/stock?q=modern+dental+clinic" alt="Modern Dental Clinic" className="w-full h-64 md:h-80 object-cover rounded-2xl shadow-md" />`).
+- Match image tone to site color scheme (warm site → warm-tone images, cool site → cool-tone images).
+- Use `getImageUsage` for ready-to-use JSX code with correct URL and alt text.
+- Max 3-4 library images per page; user-uploaded images always take priority.
 
 ## Theme Changes Are Efficient — CSS Variables Cascade Automatically
 When the user asks to change colors, fonts, or spacing globally:

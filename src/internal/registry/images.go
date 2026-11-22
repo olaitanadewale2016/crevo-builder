@@ -115,6 +115,12 @@ func SearchImages(imageType, category, mood, tone string, limit int) []ImageEntr
 		}
 	}
 
+	// If local search produced fewer results and a category was requested, search curated industry catalog
+	if len(results) < limit && category != "" {
+		curated := SearchCuratedIndustryImages(category, imageType, mood, tone, limit-len(results))
+		results = append(results, curated...)
+	}
+
 	return results
 }
 
@@ -130,8 +136,14 @@ func matchesCategory(img ImageEntry, category string) bool {
 	return false
 }
 
-// FormatImageURL constructs the full URL for an image served from Laravel storage
+// FormatImageURL constructs the full URL for an image served from Laravel storage or external CDN
 func FormatImageURL(img ImageEntry, laravelURL string) string {
+	if strings.HasPrefix(img.Filename, "http://") || strings.HasPrefix(img.Filename, "https://") {
+		return img.Filename
+	}
+	if strings.HasPrefix(img.Filename, "/") {
+		return fmt.Sprintf("%s%s", strings.TrimRight(laravelURL, "/"), img.Filename)
+	}
 	subdir := "backgrounds"
 	if img.Type == "gallery" {
 		subdir = "gallery"
@@ -224,6 +236,22 @@ func FindImageByFilename(filename string) *ImageEntry {
 		if img.Filename == filename {
 			return &img
 		}
+	}
+	for _, img := range AllCuratedIndustryImages {
+		if img.Filename == filename {
+			return &img
+		}
+	}
+	if strings.HasPrefix(filename, "http://") || strings.HasPrefix(filename, "https://") {
+		entry := ImageEntry{
+			Filename: filename,
+			Type:     "gallery",
+			Subject:  "custom-photography",
+			Category: "photography",
+			Tone:     "light",
+			Contrast: "dark-text",
+		}
+		return &entry
 	}
 	return nil
 }
