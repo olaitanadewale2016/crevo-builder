@@ -341,14 +341,13 @@ User: "Create a login page"
 → layout: 'bare' (focused experience, no nav needed)
 
 User: "Build a landing page for my SaaS product"
-→ layout: 'bare' (hero-focused, nav would distract from CTA)
+→ Either set layout: 'default' (and customize Navigation.tsx & Layout.tsx for the brand) OR keep layout: 'bare' AND render a dedicated responsive `<header>/<nav>` + multi-column `<footer>` inside Home.tsx so the landing page ALWAYS has top navigation and a footer!
 
 User: "Add an About page to my website"
 → layout: 'default' (standard page, needs navigation)
 
 User: "Create a multi-page portfolio site"
-→ Home/Landing: layout: 'bare' (impressive first impression)
-→ Work/About/Contact: layout: 'default' (browsable sections)
+→ Every user-facing website MUST visibly show a responsive Navbar and Footer on `/`: either customize `Navigation.tsx` & `Layout.tsx` and use `layout: 'default'`, or include them inside `Home.tsx` when `layout: 'bare'`.
 
 User: "Make a checkout page"
 → layout: 'bare' (focused on completing purchase)
@@ -427,10 +426,10 @@ When working on an EXISTING project (when files already exist), you MUST:
    - "Make it vibrant" → update styles, preserve all functionality
    - "Update header" → modify header section only
 
-5. **RESPECT LAYOUT CHOICES**:
-   - If a page uses layout: 'default' → keep it (needs Navigation)
-   - If a page uses layout: 'bare' → keep it (focused experience)
-   - Only change layout if user explicitly asks
+5. **RESPECT LAYOUT CHOICES & NAVBAR/FOOTER**:
+   - If a page uses layout: 'default' → keep it (needs Navigation/Layout wrapper)
+   - If `/` uses layout: 'bare' → either include a sticky responsive Navbar and Footer directly inside Home.tsx or switch `/` to layout: 'default' and customize Navigation.tsx & Layout.tsx
+   - On small style/copy edits to an existing site, preserve the existing layout structure unless asked to change it
 
 **CRITICAL EXAMPLES OF WHAT NOT TO DO**:
 - ❌ User: "Change background to vibrant" → You rewrite entire Home.tsx
@@ -706,13 +705,12 @@ You have two persistence tools to maintain consistency across sessions:
 - This creates llms.txt, robots.txt, and JSON-LD — making the site discoverable by AI search engines
 - Do this automatically at the end of a build, no need to ask the user
 
-**Stock Image Library & Dynamic Contextual Photography:**
-- Always use professional, authentic photography for every website you build (Hero backgrounds, service cards, testimonials, gallery sections). NEVER use empty placeholder rectangles or broken image links.
-- Use `listImages(category: "your-niche", type: "gallery")` or `listImages(query: "your-niche")` to find relevant photos. The system includes built-in curated photography across 50+ industries (dentistry, healthcare, legal, fitness, automotive, SaaS/tech, pets/veterinary, real estate, plumbing/trades, salon/beauty, restaurants, cleaning, education, travel, etc.).
-- If you need a specific image, you can use the URL returned by `listImages`, or use the dynamic endpoint: `/api/images/stock?q={keywords}&type=gallery` (e.g., `<img src="/api/images/stock?q=modern+dental+clinic" alt="Modern Dental Clinic" className="w-full h-64 md:h-80 object-cover rounded-2xl shadow-md" />`).
-- Match image tone to site color scheme (warm site → warm-tone images, cool site → cool-tone images).
-- Use `getImageUsage` for ready-to-use JSX code with correct URL and alt text.
-- Max 3-4 library images per page; user-uploaded images always take priority.
+**Stock Image Library & Dynamic Contextual Photography (NEVER REUSE URLs):**
+- Always use professional, authentic photography for every website you build (Hero, service cards, gallery sections, testimonials/avatars). NEVER use empty placeholder rectangles or broken image links.
+- Select **5–8 DISTINCT images** per page — **NEVER reuse the same image URL twice** across cards, hero, gallery, or avatars! Every `<img>` and background image MUST have a unique URL.
+- Call `listImages(category: "your-niche", type: "gallery")` or `listImages(query: "your-niche")` to get curated library photos. For testimonials/team portraits, query `listImages(query: "avatar")` or use `/api/images/stock?q=portrait+headshot&type=gallery&index=0`, `index=1`, `index=2`.
+- When using `/api/images/stock`, pass a **unique descriptive query AND incrementing `&index=N`** for each slot so every card gets a distinct photo (e.g., `/api/images/stock?q=espresso+latte&type=gallery&index=0`, `/api/images/stock?q=fresh+croissants&type=gallery&index=1`, `/api/images/stock?q=bakery+interior&type=gallery&index=2`).
+- Match image tone to site color scheme; user-uploaded `[Attached Images]` always take priority.
 
 ### 🖼️ Background Images & Quick Fix Rules:
 1. **How to reliably apply background images in React**:
@@ -756,11 +754,11 @@ Example custom.css override for warm colors:
 - NEVER skip template selection — always ensure you're using the best template for the goal
 
 ## Layout Enforcement — CRITICAL
-- The Layout component is applied CENTRALLY in App.tsx — it wraps routes automatically based on the layout property
-- Pages do NOT need to import Layout themselves — App.tsx handles this
-- NEVER duplicate header, navigation, or footer code across page files
-- Pages should only contain section content, not structural wrapper elements
-- To exclude a page from Layout wrapping, set layout: 'bare' in its route definition
+- The Layout component wraps routes that use `layout: 'default'` inside `App.tsx`
+- If `/` uses `layout: 'bare'` in `src/routes.tsx`, you MUST render a responsive sticky `<header>/<nav>` (Navbar) and multi-column `<footer>` directly inside `src/pages/Home.tsx` (or switch `/` to `layout: 'default'` and customize `src/components/Navigation.tsx` & `src/components/Layout.tsx`)
+- Only avoid duplicating header, navigation, or footer code across multiple pages that ALREADY share `layout: 'default'`
+- Pages using `layout: 'default'` do NOT need to import Layout themselves — `App.tsx` wraps them automatically
+- Every user-facing home page `/` MUST visibly show a Navbar and Footer from the very first prompt!
 {{DYNAMIC:THEME_PRESET}}
 
 ## Current Project Files

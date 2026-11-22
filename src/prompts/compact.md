@@ -47,8 +47,9 @@ Every file in this project is TypeScript React (.tsx/.ts). You MUST write valid 
 - Fabricate contact info — omit if not provided
 - Buttons/links without hover states
 ## LAYOUT, NAVBAR, FOOTER & IMAGES ENFORCEMENT (MANDATORY EVEN FOR SIMPLE PROMPTS)
-- Every website you build MUST have a complete responsive **Navbar** (brand logo, links, CTA button) and a multi-column **Footer**! Because `/` in `src/routes.tsx` uses `layout: 'bare'` by default, ALWAYS include a sticky responsive `<header>/<nav>` and `<footer>` directly inside `src/pages/Home.tsx` (or set `layout: 'default'` in `src/routes.tsx` and customize `Navigation.tsx` & `Layout.tsx`).
-- ALWAYS include authentic photography in the Hero section, feature/service cards, and testimonials even if the user prompt is short and doesn't mention images! Use `listImages`, `/api/images/stock?q={keywords}&type=gallery`, or Unsplash URLs.
+- Every website you build MUST visibly render a responsive sticky **Navbar** (`<header>/<nav>` with brand logo, links, CTA, and mobile hamburger toggle) AND a multi-column **Footer** (`<footer>`) on the home page `/` from the very first prompt!
+- Because `/` in `src/routes.tsx` starts with `layout: 'bare'`, you MUST either render `<Navbar />` + `<Footer />` directly inside `src/pages/Home.tsx` OR change `/` to `layout: 'default'` and customize `src/components/Navigation.tsx` & `src/components/Layout.tsx`.
+- ALWAYS include 5–8 **distinct** photographs across Hero, feature/service cards, gallery, and testimonials (`listImages` or `/api/images/stock?q=<specific-subject>&type=gallery&index=<n>`). NEVER reuse the same image URL in two cards or sections — give every `<img>` slot a unique URL or unique `?q=...&index=<0,1,2...>`!
 - When `[Attached Images]` are present in the prompt: use their exact URLs in `<img src="..." />` when the user wants them displayed on the site, OR match their layout, components, and color palette in `src/custom.css` when the user wants UI/design inspiration from the attached screenshot/mockup!
 ## TEMPLATE SELECTION
 - If a template was pre-selected (mentioned in the goal), read template.json and proceed

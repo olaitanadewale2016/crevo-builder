@@ -43,7 +43,7 @@ func (c *RequestConfig) Validate() error {
 		case "abhibots":
 			c.Agent.Model = "claude-sonnet-5"
 		case "gemini":
-			c.Agent.Model = "gemini-2.5-flash"
+			c.Agent.Model = "gemini-3.5-flash"
 		case "openrouter":
 			c.Agent.Model = "openrouter/free"
 		case "zhipu":

@@ -869,7 +869,8 @@ Use these instead of placeholder images or external hotlinks.
 **Selection rules:**
 - Match image tone to the site color scheme (warm site → warm images)
 - Use dark-text contrast images for light backgrounds, light-text for dark backgrounds
-- Max 3-4 library images per page
+- Select 5-8 DISTINCT images across hero, service/product cards, gallery, and testimonials — NEVER reuse the same URL twice
+- When using /api/images/stock?q=...&type=gallery&index=N, pass a unique descriptive q and increment index=0,1,2,3... per card
 - Always add descriptive alt text derived from the image subject
 - User-uploaded images always take priority over library images
 

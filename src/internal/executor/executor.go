@@ -734,9 +734,15 @@ func (e *Executor) listImages(ctx context.Context, args map[string]interface{}) 
 	}
 
 	results := registry.SearchImages(imageType, category, mood, tone, limit)
+	seen := make(map[string]bool, len(results)+limit)
+	for _, r := range results {
+		if r.Filename != "" {
+			seen[r.Filename] = true
+		}
+	}
 
-	// If no local or curated match was found and laravelURL is set, query the Next.js /api/images/stock endpoint
-	if len(results) == 0 && category != "" && e.laravelURL != "" {
+	// Supplement with Next.js /api/images/stock when local/curated matches are fewer than requested
+	if len(results) < limit && category != "" && e.laravelURL != "" {
 		apiURL := fmt.Sprintf("%s/api/images/stock?q=%s&type=%s&format=json&limit=%d",
 			strings.TrimRight(e.laravelURL, "/"),
 			url.QueryEscape(category),
@@ -747,60 +753,75 @@ func (e *Executor) listImages(ctx context.Context, args map[string]interface{}) 
 		if reqErr == nil {
 			client := &http.Client{Timeout: 4 * time.Second}
 			resp, doErr := client.Do(req)
-			if doErr == nil && resp.StatusCode == http.StatusOK {
+			if doErr == nil {
 				defer resp.Body.Close()
-				var apiResp struct {
-					Success bool `json:"success"`
-					Images  []struct {
-						Filename string `json:"filename"`
-						URL      string `json:"url"`
-						Type     string `json:"type"`
-						Subject  string `json:"subject"`
-						Category string `json:"category"`
-						Tone     string `json:"tone"`
-						Contrast string `json:"contrast"`
-						Alt      string `json:"alt"`
-					} `json:"images"`
-				}
-				if jsonErr := json.NewDecoder(resp.Body).Decode(&apiResp); jsonErr == nil && len(apiResp.Images) > 0 {
-					for _, item := range apiResp.Images {
-						imgUrl := item.URL
-						if imgUrl == "" {
-							imgUrl = item.Filename
+				if resp.StatusCode == http.StatusOK {
+					var apiResp struct {
+						Success bool `json:"success"`
+						Images  []struct {
+							Filename string `json:"filename"`
+							URL      string `json:"url"`
+							Type     string `json:"type"`
+							Subject  string `json:"subject"`
+							Category string `json:"category"`
+							Tone     string `json:"tone"`
+							Contrast string `json:"contrast"`
+							Alt      string `json:"alt"`
+						} `json:"images"`
+					}
+					if jsonErr := json.NewDecoder(resp.Body).Decode(&apiResp); jsonErr == nil && len(apiResp.Images) > 0 {
+						for _, item := range apiResp.Images {
+							if len(results) >= limit {
+								break
+							}
+							imgUrl := item.URL
+							if imgUrl == "" {
+								imgUrl = item.Filename
+							}
+							if imgUrl == "" || seen[imgUrl] {
+								continue
+							}
+							seen[imgUrl] = true
+							results = append(results, registry.ImageEntry{
+								Filename: imgUrl,
+								Type:     item.Type,
+								Subject:  item.Subject,
+								Category: item.Category,
+								Tone:     item.Tone,
+								Contrast: item.Contrast,
+							})
 						}
-						results = append(results, registry.ImageEntry{
-							Filename: imgUrl,
-							Type:     item.Type,
-							Subject:  item.Subject,
-							Category: item.Category,
-							Tone:     item.Tone,
-							Contrast: item.Contrast,
-						})
 					}
 				}
 			}
 		}
 	}
 
-	// Dynamic fallback if still empty: generate dynamic image endpoint URL
-	if len(results) == 0 && category != "" {
+	// Dynamic fallback if fewer than 4 distinct images: generate indexed root-relative endpoints
+	if len(results) < 4 && category != "" {
 		dynType := imageType
 		if dynType == "" {
 			dynType = "gallery"
 		}
-		dynURL := fmt.Sprintf("%s/api/images/stock?q=%s&type=%s",
-			strings.TrimRight(e.laravelURL, "/"),
-			url.QueryEscape(category),
-			dynType,
-		)
-		results = append(results, registry.ImageEntry{
-			Filename: dynURL,
-			Type:     dynType,
-			Subject:  category,
-			Category: category,
-			Tone:     "light",
-			Contrast: "dark-text",
-		})
+		for idx := 0; len(results) < 4 && idx < 8; idx++ {
+			dynURL := fmt.Sprintf("/api/images/stock?q=%s&type=%s&index=%d",
+				url.QueryEscape(category),
+				dynType,
+				idx,
+			)
+			if seen[dynURL] {
+				continue
+			}
+			seen[dynURL] = true
+			results = append(results, registry.ImageEntry{
+				Filename: dynURL,
+				Type:     dynType,
+				Subject:  fmt.Sprintf("%s #%d", category, idx+1),
+				Category: category,
+				Tone:     "light",
+				Contrast: "dark-text",
+			})
+		}
 	}
 
 	return &ToolResult{
