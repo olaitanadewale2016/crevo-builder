@@ -674,7 +674,31 @@ func (s *Server) handleBuild(c *gin.Context) {
 	s.runBuildInWorkspace(c, workspacePath)
 }
 
-// runBuildInWorkspace runs npm install and npm run build in the given workspace
+// isDistUpToDate returns true if dist/index.html exists and is newer than all source files in src/
+func isDistUpToDate(workspacePath string) bool {
+	distIndex := filepath.Join(workspacePath, "dist", "index.html")
+	distInfo, err := os.Stat(distIndex)
+	if err != nil {
+		return false
+	}
+	distTime := distInfo.ModTime()
+
+	srcDir := filepath.Join(workspacePath, "src")
+	upToDate := true
+	_ = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if info.ModTime().After(distTime) {
+			upToDate = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return upToDate
+}
+
+// runBuildInWorkspace runs fast Vite build in the given workspace (or reuses fresh dist/ from VerifyBuild)
 func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	// Check if package.json exists
 	packageJSON := filepath.Join(workspacePath, "package.json")
@@ -683,34 +707,39 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 		return
 	}
 
-	// Run npm install only if node_modules does not exist
-	nodeModules := filepath.Join(workspacePath, "node_modules")
-	if _, err := os.Stat(nodeModules); os.IsNotExist(err) {
-		installCmd := exec.Command("npm", "install", "--ignore-scripts", "--prefer-offline")
-		installCmd.Dir = workspacePath
-		if output, err := installCmd.CombinedOutput(); err != nil {
-			s.logger.WithField("output", string(output)).WithError(err).Error("npm install failed")
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error: fmt.Sprintf("npm install failed: %s", string(output)),
-			})
-			return
-		}
+	// Fast-path: if VerifyBuild already produced an up-to-date dist/ folder, skip rebuilding (0ms!)
+	if isDistUpToDate(workspacePath) {
+		c.JSON(http.StatusOK, models.BuildResponse{
+			Success: true,
+			Message: "Build completed successfully (cached dist)",
+		})
+		return
 	}
 
-	// Run npm run build (fallback to npx vite build if tsc errors occur)
-	buildCmd := exec.Command("npm", "run", "build")
+	// Ensure node_modules exists via shared cache symlink or one-time npm install
+	if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err != nil {
+		s.logger.WithError(err).Error("Failed to prepare node_modules")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: fmt.Sprintf("npm install failed: %s", err.Error()),
+		})
+		return
+	}
+
+	// Run direct Vite build (skips slow tsc pass)
+	viteBin := filepath.Join(workspacePath, "node_modules", ".bin", "vite")
+	var buildCmd *exec.Cmd
+	if _, err := os.Stat(viteBin); err == nil {
+		buildCmd = exec.Command(viteBin, "build", "--logLevel", "error")
+	} else {
+		buildCmd = exec.Command("npx", "vite", "build", "--logLevel", "error")
+	}
 	buildCmd.Dir = workspacePath
 	if output, err := buildCmd.CombinedOutput(); err != nil {
-		s.logger.WithField("output", string(output)).Warn("npm run build failed, attempting npx vite build fallback")
-		fallbackCmd := exec.Command("npx", "vite", "build")
-		fallbackCmd.Dir = workspacePath
-		if fbOutput, fbErr := fallbackCmd.CombinedOutput(); fbErr != nil {
-			s.logger.WithField("output", string(fbOutput)).WithError(fbErr).Error("vite build fallback failed")
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error: fmt.Sprintf("npm run build failed: %s\nFallback vite build failed: %s", string(output), string(fbOutput)),
-			})
-			return
-		}
+		s.logger.WithField("output", string(output)).WithError(err).Error("vite build failed")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: fmt.Sprintf("vite build failed: %s", string(output)),
+		})
+		return
 	}
 
 	// Check if dist folder exists

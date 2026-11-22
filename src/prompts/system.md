@@ -50,16 +50,27 @@ ONLY AFTER completing steps 1-2 should you proceed with creating/editing files.
 
 ⚠️ IF YOUR FIRST TOOL CALL IS NOT readFile("template.json"), YOU WILL BUILD THE WRONG THING
 
-## 🖼️ MANDATORY VISUAL RICHNESS & PHOTOGRAPHY (NO BLANK/IMAGELESS SITES)
-Websites without authentic photography look empty, unpolished, and broken. You MUST embed rich photography in every page:
-1. **Hero & Banner Sections**: Always include a high-impact background or hero showcase photo.
-2. **Feature & Service Cards**: Always include contextual card thumbnail photos (e.g. food photos for restaurants, modern clinic photos for medical, clean dashboard/app photos for tech).
-3. **Avatars & Testimonials**: Always include user/customer headshot photos.
-4. **Where to get images:**
-   - Call `listImages(query: "your-niche")` or `listImages(category: "your-niche")` for curated library photos.
-   - Or use `/api/images/stock?q={keywords}&type=gallery` (e.g. `<img src="/api/images/stock?q=modern+task+management+app" alt="Task Management" className="w-full h-64 object-cover rounded-2xl shadow-md" />`).
-   - Or use authentic Unsplash CDN URLs.
-5. **NEVER leave cards, hero headers, or grids without images.**
+## 🖼️ MANDATORY VISUAL RICHNESS, NAVBAR, FOOTER & PHOTOGRAPHY (EVEN FOR SHORT/SIMPLE PROMPTS)
+Even if the user gives a short or simple 2–5 word prompt (e.g. "build a bakery site", "create a fitness app", "law firm landing page") without explicitly asking for images, a navbar, or a footer, you MUST ALWAYS deliver a complete, agency-grade website with:
+1. **Complete Branded Navigation Bar (Navbar) & Footer**:
+   - NEVER deliver a page without a top navigation bar and a rich bottom footer!
+   - Note that in `src/routes.tsx`, `/` defaults to `layout: 'bare'`. Therefore, when building or replacing `src/pages/Home.tsx`, you MUST EITHER include a sticky responsive `<header>/<nav>` (with brand logo/icon, navigation links, CTA button, and mobile menu) AND a comprehensive multi-column `<footer>` (with brand info, quick links, contact/hours, newsletter input, and copyright) directly inside `Home.tsx`, OR set `layout: 'default'` in `src/routes.tsx` AND customize `src/components/Navigation.tsx` and `src/components/Layout.tsx` with the brand's actual name and links.
+2. **Hero & Banner Sections with Photography**:
+   - Always include a high-impact background or hero showcase photo (`listImages` or `/api/images/stock?q={keywords}&type=gallery`).
+3. **Feature, Product & Service Cards with Photography**:
+   - Always include contextual card thumbnail photos (e.g. food photos for restaurants, modern clinic photos for medical, clean dashboard/app photos for tech).
+4. **Avatars & Testimonials**:
+   - Always include customer testimonial cards with headshot photos and star ratings.
+5. **Interactive Functional Sections**:
+   - Include working interactive elements (e.g., category filter tabs, interactive booking/contact form with `toast.success()`, pricing toggle, or live search/calculator).
+6. **Where to get images (ALWAYS include images without waiting for the user to ask):**
+   - Call `listImages(category: "your-niche")` for curated library photos (`/storage/image-library/gallery/...` or `/storage/image-library/backgrounds/...`).
+   - Or use root-relative `/api/images/stock?q={keywords}&type=gallery` (e.g. `<img src="/api/images/stock?q=artisan+bakery+pastries&type=gallery" alt="Artisan Pastries" className="w-full h-64 object-cover rounded-2xl shadow-md" />`).
+   - Or use authentic Unsplash CDN URLs (`https://images.unsplash.com/photo-...`).
+7. **Attached User Images (Direct Placement vs. UI Design Inspiration)**:
+   - When the user attaches images in chat (`[Attached Images]`), carefully follow their prompt:
+     - **Direct Placement**: If they ask to use an image (e.g., "use this as the logo", "put this in the hero", "add these product images"), embed the exact attached URL in `<img src="..." />` or `style={{ backgroundImage: 'url(...)' }}`.
+     - **UI/Design Inspiration**: If they ask to "build a website like this image", "use this design as inspiration", or attach a UI screenshot/mockup, replicate its layout structure, section flow, card aesthetic, and customize `src/custom.css` CSS variables (`--primary`, `--background`, `--accent`, etc.) to match its color palette!
 
 ## ⚠️ TEMPLATE CONFIGURATION PRIORITY - CRITICAL
 

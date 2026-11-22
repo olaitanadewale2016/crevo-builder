@@ -136,19 +136,19 @@ func matchesCategory(img ImageEntry, category string) bool {
 	return false
 }
 
-// FormatImageURL constructs the full URL for an image served from Laravel storage or external CDN
+// FormatImageURL constructs a root-relative or CDN URL so images load across /preview, /app, and published tabs
 func FormatImageURL(img ImageEntry, laravelURL string) string {
 	if strings.HasPrefix(img.Filename, "http://") || strings.HasPrefix(img.Filename, "https://") {
 		return img.Filename
 	}
 	if strings.HasPrefix(img.Filename, "/") {
-		return fmt.Sprintf("%s%s", strings.TrimRight(laravelURL, "/"), img.Filename)
+		return img.Filename
 	}
 	subdir := "backgrounds"
 	if img.Type == "gallery" {
 		subdir = "gallery"
 	}
-	return fmt.Sprintf("%s/storage/image-library/%s/%s", strings.TrimRight(laravelURL, "/"), subdir, img.Filename)
+	return fmt.Sprintf("/storage/image-library/%s/%s", subdir, img.Filename)
 }
 
 // FormatImageList formats a slice of images for display to the AI

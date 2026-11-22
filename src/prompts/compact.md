@@ -46,13 +46,10 @@ Every file in this project is TypeScript React (.tsx/.ts). You MUST write valid 
 - Hardcoded colors (bg-blue-500) — use bg-primary, text-foreground
 - Fabricate contact info — omit if not provided
 - Buttons/links without hover states
-## LAYOUT ENFORCEMENT
-- Layout is applied centrally in App.tsx. Pages do NOT import Layout. NEVER duplicate nav/header/footer.
-- Use layout: 'bare' in route definition to exclude a page from Layout wrapping.
-## STOCK IMAGES
-- Use listImages to find professional stock photos instead of placeholders
-- Use getImageUsage for ready-to-use JSX code with correct URL and alt text
-- Max 3-4 library images per page; user-uploaded images always take priority
+## LAYOUT, NAVBAR, FOOTER & IMAGES ENFORCEMENT (MANDATORY EVEN FOR SIMPLE PROMPTS)
+- Every website you build MUST have a complete responsive **Navbar** (brand logo, links, CTA button) and a multi-column **Footer**! Because `/` in `src/routes.tsx` uses `layout: 'bare'` by default, ALWAYS include a sticky responsive `<header>/<nav>` and `<footer>` directly inside `src/pages/Home.tsx` (or set `layout: 'default'` in `src/routes.tsx` and customize `Navigation.tsx` & `Layout.tsx`).
+- ALWAYS include authentic photography in the Hero section, feature/service cards, and testimonials even if the user prompt is short and doesn't mention images! Use `listImages`, `/api/images/stock?q={keywords}&type=gallery`, or Unsplash URLs.
+- When `[Attached Images]` are present in the prompt: use their exact URLs in `<img src="..." />` when the user wants them displayed on the site, OR match their layout, components, and color palette in `src/custom.css` when the user wants UI/design inspiration from the attached screenshot/mockup!
 ## TEMPLATE SELECTION
 - If a template was pre-selected (mentioned in the goal), read template.json and proceed
 - If NO template was pre-selected: call fetchTemplates, select the best match, call useTemplate
