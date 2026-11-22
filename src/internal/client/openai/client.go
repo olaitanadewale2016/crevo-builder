@@ -18,15 +18,16 @@ import (
 
 // Client implements AIProvider using OpenAI or compatible APIs
 type Client struct {
-	client      *openai.Client
-	httpClient  *http.Client
-	apiKey      string
-	baseURL     string
-	model       string
-	maxTokens   int
-	logger      *logrus.Logger
-	retryConfig models.RetryConfig
-	onRetry     models.RetryCallback
+	client          *openai.Client
+	httpClient      *http.Client
+	apiKey          string
+	baseURL         string
+	model           string
+	maxTokens       int
+	reasoningEffort string
+	logger          *logrus.Logger
+	retryConfig     models.RetryConfig
+	onRetry         models.RetryCallback
 }
 
 // Ensure Client implements AIProvider
@@ -37,6 +38,7 @@ type chatRequest struct {
 	Messages            []chatMessage `json:"messages"`
 	Tools               []chatTool    `json:"tools,omitempty"`
 	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
 }
 
 type chatMessage struct {
@@ -126,15 +128,16 @@ func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryC
 	}
 
 	return &Client{
-		client:      oaiClient,
-		httpClient:  httpClient,
-		apiKey:      cfg.APIKey,
-		baseURL:     baseURL,
-		model:       model,
-		maxTokens:   maxTokens,
-		logger:      logger,
-		retryConfig: retryConfig,
-		onRetry:     onRetry,
+		client:          oaiClient,
+		httpClient:      httpClient,
+		apiKey:          cfg.APIKey,
+		baseURL:         baseURL,
+		model:           model,
+		maxTokens:       maxTokens,
+		reasoningEffort: cfg.ReasoningEffort,
+		logger:          logger,
+		retryConfig:     retryConfig,
+		onRetry:         onRetry,
 	}
 }
 
@@ -255,6 +258,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			MaxCompletionTokens: c.maxTokens,
 			Messages:            chatMessages,
 			Tools:               chatTools,
+		}
+		if c.reasoningEffort != "" && supportsReasoningEffort(candidateModel) {
+			reqPayload.ReasoningEffort = c.reasoningEffort
 		}
 
 		reqBodyBytes, err := json.Marshal(reqPayload)
@@ -469,6 +475,19 @@ func BuildAssistantMessageWithToolCalls(content string, toolCalls []models.ToolC
 		Content:   content,
 		ToolCalls: toolCalls,
 	}
+}
+
+// supportsReasoningEffort returns true for models that accept the reasoning_effort field
+func supportsReasoningEffort(model string) bool {
+	m := strings.ToLower(model)
+	return strings.HasPrefix(m, "o1") ||
+		strings.HasPrefix(m, "o3") ||
+		strings.HasPrefix(m, "o4") ||
+		strings.HasPrefix(m, "gpt-5") ||
+		strings.Contains(m, "reasoning") ||
+		strings.Contains(m, "thinking") ||
+		strings.Contains(m, "reasoner") ||
+		strings.Contains(m, "grok-3-mini")
 }
 
 // ConvertToolCallsToOpenAI converts our ToolCall to openai.ToolCall

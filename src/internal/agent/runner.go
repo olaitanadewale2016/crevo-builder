@@ -270,6 +270,18 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 	session.SetCancel(cancel)
 	session.SetStatus(models.StatusRunning)
 
+	// Scale maxIterations based on reasoning_effort (low, medium, high)
+	switch r.aiConfig.ReasoningEffort {
+	case "low":
+		if maxIterations > 12 {
+			maxIterations = 12
+		}
+	case "high":
+		if maxIterations < 28 {
+			maxIterations = 28
+		}
+	}
+
 	streamer := session.GetStreamer()
 	features := session.GetFeatures()
 
@@ -365,6 +377,14 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		session.SetError(err.Error())
 		session.SetStatus(models.StatusFailed)
 		return fmt.Errorf("building system prompt: %w", err)
+	}
+
+	// Append effort-level instruction guidance
+	switch r.aiConfig.ReasoningEffort {
+	case "low":
+		systemPrompt += "\n\n[EFFORT LEVEL: LOW — FAST MODE]\nExecute the request directly and concisely in as few tool calls as possible. Skip lengthy exploratory planning and focus on immediate, high-speed delivery."
+	case "high":
+		systemPrompt += "\n\n[EFFORT LEVEL: HIGH — DEEP ARCHITECTURAL MODE]\nApply deep reasoning, comprehensive UI/UX polish, rich micro-interactions, responsive layouts, and thorough multi-component implementation."
 	}
 
 	// Initialize conversation with system prompt
