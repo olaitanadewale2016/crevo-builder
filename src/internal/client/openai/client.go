@@ -166,15 +166,34 @@ func (c *Client) convertMessage(msg models.Message) openai.ChatCompletionMessage
 }
 
 // getModelFallbackPool returns an ordered list of models to try.
-// If a specific model is set by the admin or user, we strictly use that model without overriding.
+// Always prioritizes the admin/user's exact configured model first.
+// For official Google Gemini (googleapis.com), appends sibling free-tier model buckets ONLY as
+// emergency failover if the primary model hits Google's 24-hour daily quota ceiling (e.g. limit: 20/day).
 func getModelFallbackPool(currentModel string, baseURL string) []string {
+	isOfficialGemini := strings.Contains(strings.ToLower(baseURL), "googleapis.com")
 	if currentModel != "" {
-		return []string{currentModel}
+		if !isOfficialGemini {
+			return []string{currentModel}
+		}
+		pool := []string{currentModel}
+		seen := map[string]bool{strings.ToLower(currentModel): true}
+		for _, fallback := range []string{
+			"gemini-2.5-flash-lite",
+			"gemini-2.5-flash",
+			"gemini-2.0-flash",
+			"gemini-2.0-flash-lite",
+		} {
+			if !seen[fallback] {
+				seen[fallback] = true
+				pool = append(pool, fallback)
+			}
+		}
+		return pool
 	}
 
 	// Only if no model was specified at all do we provide a sensible default:
-	if strings.Contains(baseURL, "googleapis.com") || strings.Contains(baseURL, "gemini") {
-		return []string{"gemini-2.5-flash-lite"}
+	if isOfficialGemini || strings.Contains(strings.ToLower(baseURL), "gemini") {
+		return []string{"gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"}
 	}
 	if strings.Contains(baseURL, "openrouter.ai") {
 		return []string{"openrouter/free"}
@@ -436,16 +455,26 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 				break
 			}
 
-			// Parse error from upstream
-			var errObj struct {
+			// Parse error from upstream (handles both standard JSON objects and Gemini's JSON array wrapper)
+			type upstreamErrStruct struct {
 				Error struct {
 					Message string `json:"message"`
 				} `json:"error"`
 				Message string `json:"message"`
 				Detail  string `json:"detail"`
 			}
+			var errObj upstreamErrStruct
 			_ = json.Unmarshal(bodyBytes, &errObj)
 			errMsg := errObj.Error.Message
+			if errMsg == "" {
+				var errArr []upstreamErrStruct
+				if json.Unmarshal(bodyBytes, &errArr) == nil && len(errArr) > 0 {
+					errMsg = errArr[0].Error.Message
+					if errMsg == "" {
+						errMsg = errArr[0].Message
+					}
+				}
+			}
 			if errMsg == "" {
 				errMsg = errObj.Message
 			}
@@ -458,7 +487,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					errMsg = errMsg[:400] + "..."
 				}
 			}
-			lastErr = fmt.Errorf("openai error: %d %s", httpResp.StatusCode, errMsg)
+			lastErr = fmt.Errorf("HTTP %d (%s): %s", httpResp.StatusCode, candidateModel, errMsg)
 			lowerErr := strings.ToLower(errMsg)
 
 			// If bare custom base URL returned 404 (missing /v1), automatically retry with /v1/chat/completions
@@ -540,6 +569,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					strings.Contains(lowerErr, "per-day") ||
 					strings.Contains(errMsg, "DayPerProject") ||
 					strings.Contains(errMsg, "limit: 20") ||
+					strings.Contains(lowerErr, "generate_content_free_tier_requests") ||
 					strings.Contains(lowerErr, "daily limit")
 
 				// Only fail over to another model if it is an actual 24h daily quota exhaustion
@@ -548,6 +578,8 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 						if c.logger != nil {
 							c.logger.Warnf("Model %s exhausted daily quota, failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
 						}
+					} else {
+						lastErr = fmt.Errorf("Gemini free-tier daily quota exhausted for %s (20 req/day limit reached on Google AI Studio). Wait for daily reset, enable billing on Google AI Studio, or switch AI provider/model in Admin → AI Providers", candidateModel)
 					}
 					break
 				}
@@ -586,7 +618,12 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 				continue
 			}
 
-			// Fatal errors (400, 401, 403, context length)
+			// Fatal auth errors (401/403): return immediately without trying sibling fallback models
+			if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+				return nil, lastErr
+			}
+
+			// Fatal errors (400, 404, context length)
 			break
 		}
 
@@ -605,7 +642,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 				"error":    lastErr.Error(),
 			}).Debug("AI request failed")
 		}
-		return nil, fmt.Errorf("openai error: %w", lastErr)
+		return nil, lastErr
 	}
 
 	if len(finalResp.Choices) == 0 {
