@@ -581,6 +581,15 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		// Send thinking event at start to begin frontend timer
 		streamer.SendThinking("", iterationsRun)
 
+		// Gentle pacing between iterations to avoid bursting 15 RPM free-tier quota in rapid loops
+		if iterationsRun > 1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(1200 * time.Millisecond):
+			}
+		}
+
 		// Call AI
 		response, err := provider.Chat(ctx, messages, tools)
 		if err != nil {

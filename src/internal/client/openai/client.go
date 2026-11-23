@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,9 +172,6 @@ func getModelFallbackPool(currentModel string, baseURL string) []string {
 	if isGemini {
 		pool = []string{
 			"gemini-2.5-flash-lite",
-			"gemini-2.0-flash",
-			"gemini-2.0-flash-lite",
-			"gemini-1.5-flash",
 			"gemini-2.5-flash",
 		}
 	} else if isOpenRouter {
@@ -189,22 +187,9 @@ func getModelFallbackPool(currentModel string, baseURL string) []string {
 		return []string{currentModel}
 	}
 
-	result := make([]string, 0, len(pool)+1)
-	// If currentModel is gemini-2.5-flash (20 requests/day limit on free tier), prefer high-quota models first
-	if isGemini && currentModel == "gemini-2.5-flash" {
-		result = append(result, "gemini-2.5-flash-lite", "gemini-2.0-flash")
-	} else {
-		result = append(result, currentModel)
-	}
+	result := []string{currentModel}
 	for _, m := range pool {
-		alreadyPresent := false
-		for _, r := range result {
-			if r == m {
-				alreadyPresent = true
-				break
-			}
-		}
-		if !alreadyPresent {
+		if m != currentModel {
 			result = append(result, m)
 		}
 	}
@@ -288,7 +273,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			}).Debug("Sending chat request")
 		}
 
-		maxAttempts := 3
+		maxAttempts := 6
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			select {
 			case <-ctx.Done():
@@ -371,31 +356,36 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			}
 
 			if httpResp.StatusCode == 429 {
-				isDailyQuota := strings.Contains(errMsg, "per day limit") ||
+				isTrueDailyLimit := strings.Contains(strings.ToLower(errMsg), "per day") ||
+					strings.Contains(strings.ToLower(errMsg), "per-day") ||
 					strings.Contains(errMsg, "DayPerProject") ||
 					strings.Contains(errMsg, "limit: 20") ||
-					strings.Contains(errMsg, "3h") ||
-					strings.Contains(errMsg, "RESOURCE_EXHAUSTED")
+					strings.Contains(strings.ToLower(errMsg), "daily limit")
 
-				if isDailyQuota && modelIdx < len(modelsToTry)-1 {
+				// Only fail over to another model if it is an actual 24h daily quota exhaustion
+				if isTrueDailyLimit && modelIdx < len(modelsToTry)-1 {
 					if c.logger != nil {
 						c.logger.Warnf("Model %s exhausted daily quota, failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
 					}
 					break
 				}
 
-				// If there's another model in the pool, switch to it immediately instead of waiting
-				if modelIdx < len(modelsToTry)-1 {
-					if c.logger != nil {
-						c.logger.Warnf("Model %s hit rate limit (429), failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
+				// Check Retry-After header first
+				var sleepDuration time.Duration
+				if raHeader := httpResp.Header.Get("Retry-After"); raHeader != "" {
+					if secs, parseErr := strconv.Atoi(strings.TrimSpace(raHeader)); parseErr == nil && secs > 0 {
+						sleepDuration = time.Duration(secs) * time.Second
 					}
-					break
 				}
 
-				// If this is the last or only model, wait and retry with short backoff
-				sleepDuration := time.Duration(2*(attempt+1)) * time.Second
+				// If no header or header is 0, use adaptive backoff to clear rolling 60s RPM window:
+				// Attempt 0: 5s, Attempt 1: 10s, Attempt 2: 15s, Attempt 3: 20s, Attempt 4: 25s
+				if sleepDuration <= 0 {
+					sleepDuration = time.Duration((attempt+1)*5) * time.Second
+				}
+
 				if c.logger != nil {
-					c.logger.Warnf("Model %s rate limited. Waiting %v before attempt %d", candidateModel, sleepDuration, attempt+2)
+					c.logger.Warnf("Model %s rate limited (429). Waiting %v before attempt %d/%d", candidateModel, sleepDuration, attempt+2, maxAttempts)
 				}
 				select {
 				case <-ctx.Done():
