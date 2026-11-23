@@ -300,17 +300,23 @@ Use this BEFORE modifying files on an existing project. Combined with template.j
 func VerifyBuildTool() models.ToolDefinition {
 	return models.ToolDefinition{
 		Name: "verifyBuild",
-		Description: `Run TypeScript build to check for errors. Use after EVERY file change - do not skip.
+		Description: `Run build verification and Vite bundling to check for compilation errors and generate the live preview bundle.
+
+CRITICAL TIMING RULES:
+- Call this tool ONLY ONCE at the very end of your task, after ALL page files, components, and routes have been created or modified.
+- NEVER call verifyBuild in the middle of creating pages or after every single file change. Intermediate builds waste time and fail because files reference each other before all are written.
+- Standard flow: Create/edit files -> Update routes -> Run verifyIntegration -> Run verifyBuild ONCE at the end.
 
 Key behaviors:
-- Automatically runs 'npm install' if node_modules doesn't exist yet
+- Compiles the project and verifies all imports and JSX syntax
+- Generates the production dist/ bundle for the live preview
 - Returns 'Build successful' or error messages in format 'file:line:column: error message'
 
 IMPORTANT: If build fails:
 1. READ the error message carefully (note file, line, column)
 2. Use readFile to see the problematic code in context
 3. FIX the specific issue (don't guess - understand the error)
-4. Run verifyBuild again
+4. Run verifyBuild again to verify the fix
 5. Do NOT just retry without fixing - each retry wastes resources`,
 		Parameters: map[string]interface{}{
 			"type":       "object",

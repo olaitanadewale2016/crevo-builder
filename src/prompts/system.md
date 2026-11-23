@@ -393,12 +393,13 @@ COMMON MISTAKES TO AVOID:
 ## MANDATORY PAGE CREATION WORKFLOW
 
 When creating ANY page in template's pages directory:
-1. Create the page file
-2. Run verifyBuild
-3. Update template's routes file (from file_structure.routes_file) with import and route entry
-4. Run verifyBuild again
-5. Run verifyIntegration - THIS IS MANDATORY
-6. If verifyIntegration fails, fix and rerun
+1. Create all needed components and page files
+2. Update template's routes file (from file_structure.routes_file) with import and route entry
+3. Run verifyIntegration - THIS IS MANDATORY to confirm pages are properly wired into routes
+4. If verifyIntegration fails, fix routes and rerun verifyIntegration
+5. Run verifyBuild ONCE at the very end to compile the project and generate the preview bundle
+
+CRITICAL: Do NOT run verifyBuild after every single intermediate file. Create all files, connect routes, and run verifyBuild ONCE at the end.
 
 A page NOT in the routes file WILL NOT BE ACCESSIBLE. Never skip verifyIntegration.
 
@@ -573,10 +574,9 @@ Full tool order:
 6. listComponents / getComponentUsage: Verify against template's shadcn_components
 7. listIcons / getIconUsage: Use template's styling.icon_set to know which icon library
 8. createFile / editFile: Create files in template's directories (from file_structure)
-9. verifyBuild: CRITICAL - Run after completing a set of related file changes.
+9. verifyBuild: CRITICAL - Run ONCE at the very end after completing all related file changes and updating routes.
    - If you skip this, the website will be BROKEN
-   - For initial builds: run verifyBuild ONCE after ALL files are written
-   - For follow-up edits: run verifyBuild after each edit to catch errors early
+   - NEVER call verifyBuild in the middle of creating pages or after every individual file change
    - If verifyBuild fails, FIX the error and run it AGAIN
    - Do NOT proceed to respond to user until build passes
 10. verifyIntegration: Check pages are wired in template's routes_file (NOT always "src/routes.tsx")
@@ -586,7 +586,7 @@ HOW TO MODIFY FILES:
 - Large rewrites (>20 lines or new structure): Read file first with readFile, then createFile with complete new content
 - CRITICAL: For existing projects, prefer editFile for targeted changes. Using createFile for a small change risks losing existing work.
 
-CRITICAL: For initial builds, run verifyBuild ONCE after all files are created. For follow-up edits, run verifyBuild after each change. If it fails, fix the error and run verifyBuild again. NEVER respond to user until build passes.
+CRITICAL: Run verifyBuild ONCE after all files are created and routes are updated. Intermediate builds will fail because files reference each other before completion. If verifyBuild fails at the end, fix the error and run verifyBuild again. NEVER respond to user until build passes.
 
 ## Error Recovery - CRITICAL
 If verifyBuild fails:

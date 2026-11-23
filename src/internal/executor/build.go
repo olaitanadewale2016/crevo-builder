@@ -41,7 +41,7 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	}
 	nodeModulesPath := filepath.Join(workspacePath, "node_modules")
 
-	// If node_modules is an old symlink or broken partial dir (missing .bin/vite), remove it so cp -al never nests
+	// If node_modules is already healthy with .bin/vite, return immediately (0ms)
 	if info, err := os.Lstat(nodeModulesPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
 			_ = os.Remove(nodeModulesPath)
@@ -57,19 +57,39 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	nodeModulesMu.Lock()
 	defer nodeModulesMu.Unlock()
 
-	sharedCacheDir := filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules")
-	sharedViteBin := filepath.Join(sharedCacheDir, ".bin", "vite")
+	// Locate shared cache across standard paths
+	cacheCandidates := []string{
+		filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules"),
+		"/app/storage/workspaces/.shared_node_modules",
+		"storage/workspaces/.shared_node_modules",
+	}
+
+	var sharedCacheDir string
+	for _, cand := range cacheCandidates {
+		viteBin := filepath.Join(cand, ".bin", "vite")
+		if _, err := os.Stat(viteBin); err == nil {
+			sharedCacheDir = cand
+			break
+		}
+		if _, err := os.Stat(filepath.Join(cand, "react")); err == nil {
+			sharedCacheDir = cand
+			break
+		}
+	}
 
 	// Fast path: hardlink-copy shared node_modules into workspace (~40ms, 0 extra disk space, real paths for Vite)
-	if _, err := os.Stat(sharedViteBin); err == nil {
+	if sharedCacheDir != "" {
+		_ = os.RemoveAll(nodeModulesPath)
 		cpCmd := exec.CommandContext(ctx, "cp", "-al", sharedCacheDir, nodeModulesPath)
 		if err := cpCmd.Run(); err == nil {
+			_ = os.Chmod(filepath.Join(nodeModulesPath, ".bin", "vite"), 0755)
 			return nil
 		}
 		// Fallback to regular recursive copy if hardlinks fail across mount points
 		_ = os.RemoveAll(nodeModulesPath)
 		cpFallback := exec.CommandContext(ctx, "cp", "-a", sharedCacheDir, nodeModulesPath)
 		if err := cpFallback.Run(); err == nil {
+			_ = os.Chmod(filepath.Join(nodeModulesPath, ".bin", "vite"), 0755)
 			return nil
 		}
 		_ = os.RemoveAll(nodeModulesPath)
@@ -85,12 +105,13 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	defer debug.FreeOSMemory()
 
 	// Populate shared cache via hardlink copy while keeping workspace node_modules intact
-	if _, err := os.Stat(sharedViteBin); os.IsNotExist(err) {
-		_ = os.RemoveAll(sharedCacheDir)
-		populateCmd := exec.CommandContext(ctx, "cp", "-al", nodeModulesPath, sharedCacheDir)
+	primarySharedDir := filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules")
+	if _, err := os.Stat(filepath.Join(primarySharedDir, ".bin", "vite")); os.IsNotExist(err) {
+		_ = os.RemoveAll(primarySharedDir)
+		populateCmd := exec.CommandContext(ctx, "cp", "-al", nodeModulesPath, primarySharedDir)
 		if populateErr := populateCmd.Run(); populateErr != nil {
-			_ = os.RemoveAll(sharedCacheDir)
-			_ = exec.CommandContext(ctx, "cp", "-a", nodeModulesPath, sharedCacheDir).Run()
+			_ = os.RemoveAll(primarySharedDir)
+			_ = exec.CommandContext(ctx, "cp", "-a", nodeModulesPath, primarySharedDir).Run()
 		}
 	}
 	return nil

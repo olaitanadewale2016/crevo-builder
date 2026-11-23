@@ -36,6 +36,14 @@ RUN npm install -g typescript esbuild vite
 # Create required runtime directories
 RUN mkdir -p storage/workspaces storage/logs prompts
 
+# Pre-install workspace template dependencies into .shared_node_modules during Docker build
+# This completely eliminates runtime npm installs, cutting build verification from 90s+ to ~2s
+COPY template-package.json /tmp/template-cache/package.json
+RUN cd /tmp/template-cache && \
+    npm install --ignore-scripts --no-audit --no-fund && \
+    mv /tmp/template-cache/node_modules /app/storage/workspaces/.shared_node_modules && \
+    rm -rf /tmp/template-cache
+
 # Copy compiled binary from builder stage
 COPY --from=builder /app/crevo-builder /app/crevo-builder
 
