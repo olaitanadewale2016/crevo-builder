@@ -614,24 +614,38 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 			// If rate limited or provider error, but we ALREADY generated files in this session!
 			// Complete the build gracefully so the user doesn't lose the created site.
-			if len(session.FilesChanged) > 0 {
+			hasChanges := (r.executor != nil && r.executor.HasFileChanges()) || session.GetFilesChanged()
+			if hasChanges {
+				session.SetFilesChanged(true)
 				r.logger.WithFields(logrus.Fields{
 					"session_id":    session.ID,
 					"iteration":     iterationsRun,
-					"files_changed": len(session.FilesChanged),
+					"files_changed": true,
 					"error":         err.Error(),
 				}).Warn("AI provider rate limited/errored after files were generated; completing session gracefully")
+
+				// Compile Vite build into dist/ so preview works immediately
+				if r.executor != nil {
+					bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil)
+					if bErr == nil && bResult != nil {
+						session.SetBuildResult(bResult.Success, bResult.Content)
+					}
+				}
 
 				successMsg := "Your website files have been generated and updated successfully! You can preview your site now."
 				streamer.SendMessage(models.MessageRoleAssistant, successMsg)
 				session.SetStatus(models.StatusCompleted)
 				streamer.SendStatus("completed", "Build complete")
 				streamer.SendComplete(models.CompleteData{
-					Iterations:   iterationsRun,
-					TokensUsed:   session.TokensUsed,
-					FilesChanged: session.FilesChanged,
-					BuildStatus:  "completed",
-					BuildMessage: "Website built successfully with updated files",
+					Iterations:       iterationsRun,
+					TokensUsed:       session.TokensUsed,
+					FilesChanged:     true,
+					BuildStatus:      session.GetBuildStatus(),
+					BuildMessage:     "Website built successfully with updated files",
+					BuildRequired:    session.IsBuildRequired(),
+					PromptTokens:     session.PromptTokens,
+					CompletionTokens: session.CompletionTokens,
+					Model:            r.aiConfig.Model,
 				})
 				return nil
 			}
@@ -642,11 +656,14 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			streamer.SendStatus("failed", "AI provider error: "+err.Error())
 			streamer.SendError(err.Error())
 			streamer.SendComplete(models.CompleteData{
-				Iterations:   iterationsRun,
-				TokensUsed:   session.TokensUsed,
-				FilesChanged: session.FilesChanged,
-				BuildStatus:  "failed",
-				BuildMessage: "AI provider error: " + err.Error(),
+				Iterations:       iterationsRun,
+				TokensUsed:       session.TokensUsed,
+				FilesChanged:     false,
+				BuildStatus:      "failed",
+				BuildMessage:     "AI provider error: " + err.Error(),
+				PromptTokens:     session.PromptTokens,
+				CompletionTokens: session.CompletionTokens,
+				Model:            r.aiConfig.Model,
 			})
 			r.logger.WithFields(logrus.Fields{
 				"session_id": session.ID,
