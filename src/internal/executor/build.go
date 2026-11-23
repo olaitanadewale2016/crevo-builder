@@ -298,6 +298,9 @@ func IsDistUpToDate(workspacePath string) bool {
 // RunViteBuild runs production Vite bundling safely within 512MB RAM limits and writes the build stamp on success.
 // Callers MUST hold BuildMu before calling RunViteBuild.
 func RunViteBuild(ctx context.Context, workspacePath string) (string, error) {
+	// Ensure standalone CSS files with @apply/@variant resolve Tailwind v4 theme tokens cleanly
+	NormalizeWorkspaceTailwindCSS(workspacePath)
+
 	// Release unused Go heap pages to OS BEFORE spawning Node/Vite/oxide/esbuild to prevent 512MB container OOM
 	runtime.GC()
 	debug.FreeOSMemory()

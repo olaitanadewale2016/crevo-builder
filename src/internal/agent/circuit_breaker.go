@@ -81,19 +81,17 @@ func NewCircuitBreakerForModel(providerType, model string) *CircuitBreaker {
 	return cb
 }
 
-// getModelTier classifies a model as "standard" (compact prompt) or "advanced" (full prompt).
-// Gemini, OpenRouter, DeepSeek, Zhipu, and fast/mini/flash/lite models use the compact prompt (~1.1K tokens vs ~13.5K)
-// to stay well within RPM/TPM rate limits and start writing website code immediately on Turn 1.
+// getModelTier classifies a model as "standard" (compact prompt) or "advanced" (full design-system prompt).
+// Matches PHP-era tiering: only ultra-lightweight models (zhipu, deepseek, -mini, -nano, -8b) use compact.md,
+// so Gemini, OpenAI, Anthropic, Grok, and OpenRouter models receive the full design-system & quality instructions.
 func getModelTier(providerType, model string) string {
 	switch providerType {
-	case "zhipu", "deepseek", "gemini", "openrouter":
+	case "zhipu", "deepseek":
 		return "standard"
 	}
 	modelLower := strings.ToLower(model)
-	if strings.Contains(modelLower, "flash") || strings.Contains(modelLower, "lite") || strings.Contains(modelLower, "gemini") {
-		return "standard"
-	}
 	// Use word-boundary check: "mini"/"nano" must be preceded by a delimiter (-, _, or start)
+	// to avoid false positives like "gemini"
 	for _, suffix := range []string{"mini", "nano"} {
 		idx := strings.Index(modelLower, suffix)
 		if idx > 0 && (modelLower[idx-1] == '-' || modelLower[idx-1] == '_') {

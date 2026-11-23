@@ -110,6 +110,11 @@ func (e *FileExecutor) CreateFile(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
+	// Normalize CSS files for Tailwind v4 compatibility (injects missing @reference or strips circular ones)
+	if strings.HasSuffix(strings.ToLower(path), ".css") {
+		content = NormalizeCSSContent(content, fullPath, e.workspacePath)
+	}
+
 	// Write file
 	e.debug("CreateFile writing file to disk")
 	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
@@ -342,6 +347,11 @@ func (e *FileExecutor) EditFile(ctx context.Context, args map[string]interface{}
 				Content: fmt.Sprintf("Edit would introduce syntax errors:\n%s\n\nOriginal file unchanged.", err.Error()),
 			}, nil
 		}
+	}
+
+	// Normalize CSS files for Tailwind v4 compatibility before saving
+	if strings.HasSuffix(strings.ToLower(path), ".css") {
+		newContent = NormalizeCSSContent(newContent, fullPath, e.workspacePath)
 	}
 
 	// Write updated content

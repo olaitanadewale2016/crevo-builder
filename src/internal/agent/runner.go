@@ -791,7 +791,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 				messages = append(messages, models.Message{
 					Role: "user",
-					Content: "STOP: You have NOT created or edited any website source files yet (such as src/custom.css or src/pages/Home.tsx). Reading files or saving site memory alone does NOT build the website! Immediately call createFile in parallel to write src/custom.css (custom palette/typography) and src/pages/Home.tsx (complete website with sticky Navbar, Hero with photo, all requested sections, unique images, and multi-column Footer), then call verifyBuild.",
+					Content: "STOP: You have NOT created or edited any website source files yet (such as src/custom.css or src/pages/Home.tsx). Reading files or saving site memory alone does NOT complete the build! Use createFile/editFile to write the complete website styling and components/pages, then run verifyBuild before giving your final response.",
 				})
 				continue
 			}

@@ -218,7 +218,7 @@ func replaceMarker(template, marker, replacement string) string {
 }
 
 func buildThemePresetSection(preset *models.ThemePreset) string {
-	if preset == nil {
+	if preset == nil || preset.ID == "" || strings.EqualFold(preset.ID, "default") {
 		return ""
 	}
 	themeLine := fmt.Sprintf("The user has selected the \"%s\" theme.", preset.Name)
@@ -244,7 +244,7 @@ The user chose this theme for a specific color feel. Do NOT suggest changing col
 }
 
 func buildThemePresetCompactSection(preset *models.ThemePreset) string {
-	if preset == nil {
+	if preset == nil || preset.ID == "" || strings.EqualFold(preset.ID, "default") {
 		return ""
 	}
 	return fmt.Sprintf("\n## THEME: %s — Use specified colors and fonts.\n", preset.Name)
