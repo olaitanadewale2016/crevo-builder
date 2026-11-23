@@ -80,23 +80,42 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	// Fast path: hardlink-copy shared node_modules into workspace (~40ms, 0 extra disk space, real paths for Vite)
 	if sharedCacheDir != "" {
 		_ = os.RemoveAll(nodeModulesPath)
-		cpCmd := exec.CommandContext(ctx, "cp", "-al", sharedCacheDir, nodeModulesPath)
+		_ = os.MkdirAll(nodeModulesPath, 0755)
+
+		// With GNU coreutils, 'cp -al src/. dest/' hardlinks all files & directories into dest/ in ~40ms
+		cpCmd := exec.CommandContext(ctx, "cp", "-al", sharedCacheDir+"/.", nodeModulesPath)
 		if err := cpCmd.Run(); err == nil {
-			_ = os.Chmod(filepath.Join(nodeModulesPath, ".bin", "vite"), 0755)
-			return nil
+			viteBin := filepath.Join(nodeModulesPath, ".bin", "vite")
+			_ = os.Chmod(viteBin, 0755)
+			if _, vErr := os.Stat(viteBin); vErr == nil {
+				return nil
+			}
 		}
-		// Fallback to regular recursive copy if hardlinks fail across mount points
+
+		// Fallback without trailing slash
 		_ = os.RemoveAll(nodeModulesPath)
-		cpFallback := exec.CommandContext(ctx, "cp", "-a", sharedCacheDir, nodeModulesPath)
-		if err := cpFallback.Run(); err == nil {
-			_ = os.Chmod(filepath.Join(nodeModulesPath, ".bin", "vite"), 0755)
-			return nil
+		cpCmd2 := exec.CommandContext(ctx, "cp", "-al", sharedCacheDir, nodeModulesPath)
+		if err := cpCmd2.Run(); err == nil {
+			viteBin := filepath.Join(nodeModulesPath, ".bin", "vite")
+			_ = os.Chmod(viteBin, 0755)
+			if _, vErr := os.Stat(viteBin); vErr == nil {
+				return nil
+			}
 		}
+
+		// Fallback to directory symlink if hardlinks fail across file systems
 		_ = os.RemoveAll(nodeModulesPath)
+		if symErr := os.Symlink(sharedCacheDir, nodeModulesPath); symErr == nil {
+			viteBin := filepath.Join(nodeModulesPath, ".bin", "vite")
+			if _, vErr := os.Stat(viteBin); vErr == nil {
+				return nil
+			}
+			_ = os.Remove(nodeModulesPath)
+		}
 	}
 
 	// Cold start: install dependencies once in workspace (capped to 192MB heap)
-	installCmd := exec.CommandContext(ctx, "npm", "install", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
+	installCmd := exec.CommandContext(ctx, "npm", "install", "--include=dev", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
 	installCmd.Dir = workspacePath
 	installCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
 	if out, err := installCmd.CombinedOutput(); err != nil {
@@ -108,11 +127,8 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	primarySharedDir := filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules")
 	if _, err := os.Stat(filepath.Join(primarySharedDir, ".bin", "vite")); os.IsNotExist(err) {
 		_ = os.RemoveAll(primarySharedDir)
-		populateCmd := exec.CommandContext(ctx, "cp", "-al", nodeModulesPath, primarySharedDir)
-		if populateErr := populateCmd.Run(); populateErr != nil {
-			_ = os.RemoveAll(primarySharedDir)
-			_ = exec.CommandContext(ctx, "cp", "-a", nodeModulesPath, primarySharedDir).Run()
-		}
+		_ = os.MkdirAll(primarySharedDir, 0755)
+		_ = exec.CommandContext(ctx, "cp", "-al", nodeModulesPath+"/.", primarySharedDir).Run()
 	}
 	return nil
 }
@@ -161,7 +177,11 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	cmdArgs := append(prefix, "build", "--logLevel", "error")
 	viteCmd := exec.CommandContext(ctx, bin, cmdArgs...)
 	viteCmd.Dir = e.workspacePath
-	viteCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
+	nodeBinPath := filepath.Join(e.workspacePath, "node_modules", ".bin")
+	viteCmd.Env = append(os.Environ(),
+		"NODE_OPTIONS=--max-old-space-size=192",
+		fmt.Sprintf("PATH=%s:%s", nodeBinPath, os.Getenv("PATH")),
+	)
 	viteOutput, viteErr := viteCmd.CombinedOutput()
 	outputStr := string(viteOutput)
 

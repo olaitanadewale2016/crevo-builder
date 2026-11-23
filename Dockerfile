@@ -27,8 +27,8 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install runtime utilities & git (required for npm dependencies & builds)
-RUN apk add --no-cache ca-certificates git curl bash
+# Install runtime utilities & git (required for npm dependencies & builds; coreutils provides GNU cp for instant hardlinks)
+RUN apk add --no-cache ca-certificates git curl bash coreutils
 
 # Install global build and validation tools (instant zero-network execution)
 RUN npm install -g typescript esbuild vite
@@ -40,7 +40,7 @@ RUN mkdir -p storage/workspaces storage/logs prompts
 # This completely eliminates runtime npm installs, cutting build verification from 90s+ to ~2s
 COPY template-package.json /tmp/template-cache/package.json
 RUN cd /tmp/template-cache && \
-    npm install --ignore-scripts --no-audit --no-fund && \
+    npm install --include=dev --ignore-scripts --no-audit --no-fund && \
     mv /tmp/template-cache/node_modules /app/storage/workspaces/.shared_node_modules && \
     rm -rf /tmp/template-cache
 

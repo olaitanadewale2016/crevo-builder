@@ -754,7 +754,11 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	cmdArgs := append(prefix, "build", "--logLevel", "error")
 	buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
 	buildCmd.Dir = workspacePath
-	buildCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
+	nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
+	buildCmd.Env = append(os.Environ(),
+		"NODE_OPTIONS=--max-old-space-size=192",
+		fmt.Sprintf("PATH=%s:%s", nodeBinPath, os.Getenv("PATH")),
+	)
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		s.logger.WithField("output", string(output)).WithError(err).Error("vite build failed")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
