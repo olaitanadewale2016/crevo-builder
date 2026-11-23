@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime/debug"
 	"syscall"
+	"time"
 
 	"crevo-builder/internal/api"
 	"crevo-builder/internal/config"
@@ -14,6 +17,10 @@ import (
 const version = "1.0.5"
 
 func main() {
+	// Tune Go runtime memory & GC for low-memory environments (e.g. Render 512MB free tier)
+	debug.SetGCPercent(60)
+	debug.SetMemoryLimit(200 * 1024 * 1024) // 200 MiB limit for Go heap
+
 	// Load configuration with CLI flags
 	cfg, err := config.LoadWithCLI(version)
 	if err != nil {
@@ -34,6 +41,22 @@ func main() {
 		fmt.Println("Failed to create storage directories")
 		os.Exit(1)
 	}
+
+	// Background memory scavenger: regularly return unused virtual memory pages to OS
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for range ticker.C {
+			debug.FreeOSMemory()
+		}
+	}()
+
+	// Background workspace cleaner: remove stale workspaces (>12 hours old) to prevent disk/page-cache bloat
+	go func() {
+		cleanTicker := time.NewTicker(15 * time.Minute)
+		for range cleanTicker.C {
+			cleanOldWorkspaces("./storage/workspaces", 12*time.Hour)
+		}
+	}()
 
 	// Create and start server
 	server := api.NewServer(api.ServerConfig{
@@ -89,4 +112,28 @@ func waitForShutdown() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
+}
+
+// cleanOldWorkspaces deletes workspaces that have not been modified within maxAge
+// (excluding .shared_node_modules cache) to prevent inode and page-cache bloat on low-memory containers.
+func cleanOldWorkspaces(workspacesDir string, maxAge time.Duration) {
+	entries, err := os.ReadDir(workspacesDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == ".shared_node_modules" {
+			continue
+		}
+		entryPath := filepath.Join(workspacesDir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.RemoveAll(entryPath)
+		}
+	}
+	debug.FreeOSMemory()
 }

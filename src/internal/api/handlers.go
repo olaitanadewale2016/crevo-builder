@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -734,6 +735,11 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 		return
 	}
 
+	// Serialize Vite builds to protect 512MB container RAM and free OS memory after build
+	executor.BuildMu.Lock()
+	defer executor.BuildMu.Unlock()
+	defer debug.FreeOSMemory()
+
 	// Ensure node_modules exists via shared cache symlink or one-time npm install
 	if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err != nil {
 		s.logger.WithError(err).Error("Failed to prepare node_modules")
@@ -743,11 +749,12 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 		return
 	}
 
-	// Run direct Vite build (skips slow tsc pass)
+	// Run direct Vite build (skips slow tsc pass, capped to 192MB heap)
 	bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
 	cmdArgs := append(prefix, "build", "--logLevel", "error")
 	buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
 	buildCmd.Dir = workspacePath
+	buildCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		s.logger.WithField("output", string(output)).WithError(err).Error("vite build failed")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -839,6 +846,7 @@ func (s *Server) serveBuildOutput(c *gin.Context, workspacePath, workspaceID str
 	c.Header("X-Files-Count", strconv.Itoa(fileCount))
 	c.Header("Content-Disposition", "attachment; filename=dist.zip")
 	c.Data(http.StatusOK, "application/zip", buf.Bytes())
+	debug.FreeOSMemory()
 }
 
 // GET /api/preview-asset/:workspace_id/*filepath - Stream preview assets directly from workspace memory/disk
@@ -884,13 +892,17 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 			bCtx, bCancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer bCancel()
 			if err := executor.EnsureSharedNodeModules(bCtx, workspacePath); err == nil {
+				executor.BuildMu.Lock()
 				bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
 				cmdArgs := append(prefix, "build", "--logLevel", "error")
 				buildCmd := exec.CommandContext(bCtx, bin, cmdArgs...)
 				buildCmd.Dir = workspacePath
+				buildCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
 				if bOut, bErr := buildCmd.CombinedOutput(); bErr != nil {
 					s.logger.WithError(bErr).WithField("output", string(bOut)).Warn("on-the-fly vite build failed in handlePreviewAsset")
 				}
+				executor.BuildMu.Unlock()
+				debug.FreeOSMemory()
 			}
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +14,10 @@ import (
 	"crevo-builder/internal/models"
 )
 
-var nodeModulesMu sync.Mutex
+var (
+	nodeModulesMu sync.Mutex
+	BuildMu       sync.Mutex
+)
 
 // BuildExecutor handles build verification
 type BuildExecutor struct {
@@ -71,12 +75,14 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 		_ = os.RemoveAll(nodeModulesPath)
 	}
 
-	// Cold start: install dependencies once in workspace
+	// Cold start: install dependencies once in workspace (capped to 192MB heap)
 	installCmd := exec.CommandContext(ctx, "npm", "install", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
 	installCmd.Dir = workspacePath
+	installCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
 	if out, err := installCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("npm install failed: %v (%s)", err, string(out))
 	}
+	defer debug.FreeOSMemory()
 
 	// Populate shared cache via hardlink copy while keeping workspace node_modules intact
 	if _, err := os.Stat(sharedViteBin); os.IsNotExist(err) {
@@ -116,6 +122,11 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Serialize Vite builds to protect 512MB container RAM and free OS memory on completion
+	BuildMu.Lock()
+	defer BuildMu.Unlock()
+	defer debug.FreeOSMemory()
+
 	// Ensure node_modules exists via 40ms hardlink cache or one-time npm install
 	if err := EnsureSharedNodeModules(ctx, e.workspacePath); err != nil {
 		return &ToolResult{
@@ -129,6 +140,7 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	cmdArgs := append(prefix, "build", "--logLevel", "error")
 	viteCmd := exec.CommandContext(ctx, bin, cmdArgs...)
 	viteCmd.Dir = e.workspacePath
+	viteCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
 	viteOutput, viteErr := viteCmd.CombinedOutput()
 	outputStr := string(viteOutput)
 
@@ -177,6 +189,7 @@ func (e *BuildExecutor) validateWorkspaceSyntax(ctx context.Context) error {
 			cmdArgs := append(prefix, relPath, fmt.Sprintf("--loader:%s=%s", ext[1:], loader), "--outfile=/dev/null")
 			cmd := exec.CommandContext(ctx, bin, cmdArgs...)
 			cmd.Dir = e.workspacePath
+			cmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
 			if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
 				outStr := string(out)
 				if strings.Contains(outStr, "error:") || strings.Contains(outStr, "ERROR:") {

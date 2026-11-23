@@ -50,6 +50,11 @@ ENV HOST=0.0.0.0
 ENV PORT=8080
 ENV CREVO_DEBUG=false
 
+# Render Free Tier memory optimization (512MB RAM ceiling)
+ENV NODE_OPTIONS="--max-old-space-size=192"
+ENV GOMEMLIMIT=200MiB
+ENV GOGC=60
+
 EXPOSE 8080
 
 # Run with dynamic PORT support for Render/Koyeb/Fly/Railway
