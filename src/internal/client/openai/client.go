@@ -242,6 +242,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		}
 		if c.reasoningEffort != "" && supportsReasoningEffort(candidateModel) {
 			reqPayload.ReasoningEffort = c.reasoningEffort
+		} else if strings.Contains(strings.ToLower(candidateModel), "gemini-2.5") {
+			// For Gemini 2.5, cap reasoning_effort to "low" to avoid excessive thinking latency
+			reqPayload.ReasoningEffort = "low"
 		}
 
 		reqBodyBytes, err := json.Marshal(reqPayload)
@@ -475,7 +478,8 @@ func supportsReasoningEffort(model string) bool {
 		strings.Contains(m, "reasoning") ||
 		strings.Contains(m, "thinking") ||
 		strings.Contains(m, "reasoner") ||
-		strings.Contains(m, "grok-3-mini")
+		strings.Contains(m, "grok-3-mini") ||
+		strings.Contains(m, "gemini-2.5")
 }
 
 // ConvertToolCallsToOpenAI converts our ToolCall to openai.ToolCall
