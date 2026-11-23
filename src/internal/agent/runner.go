@@ -543,8 +543,9 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 	var lastIntegrationError string
 	integrationFinalNotified := false // Flag to track if we've sent final notification about unresolved issues
 
-	// Empty response nudge: when AI returns no content and no tool calls, nudge once for a final summary
+	// Empty response / no-code nudges: prevent premature completion before writing website code
 	emptyResponseNudged := false
+	noCodeNudges := 0
 
 	// Set model-appropriate circuit breaker thresholds
 	session.SetCircuitBreakerForModel(r.aiConfig.ProviderType, r.aiConfig.Model)
@@ -583,12 +584,12 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 		// Pacing between iterations to avoid bursting RPM rate limits (e.g. Gemini 15 RPM free tier limit)
 		if iterationsRun > 1 {
-			pacing := 2000 * time.Millisecond
+			pacing := 1500 * time.Millisecond
 			isGemini := r.aiConfig.ProviderType == "gemini" ||
 				strings.Contains(strings.ToLower(r.aiConfig.Model), "gemini") ||
 				strings.Contains(r.aiConfig.BaseURL, "googleapis.com")
 			if isGemini {
-				pacing = 4000 * time.Millisecond // Strict 15 RPM (1 request / 4s) ensures we stay below the ceiling
+				pacing = 2500 * time.Millisecond
 			}
 			select {
 			case <-ctx.Done():
@@ -612,18 +613,18 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 				return ctx.Err()
 			}
 
-			// Only complete gracefully if the AI ACTUALLY created or edited workspace files during this run.
-			// Do NOT treat initial template extraction (session.GetFilesChanged()) as AI progress —
-			// otherwise Iteration-1 AI provider errors get swallowed and build an unmodified starter template!
-			hasAiChanges := r.executor != nil && r.executor.HasFileChanges()
-			if hasAiChanges {
+			// Only complete gracefully if the AI ACTUALLY created or edited website source files during this run.
+			// Metadata-only writes (updateSiteMemory, writeDesignIntelligence) and initial template extraction
+			// MUST NOT hide an AI provider/rate-limit failure or trigger a fake "Build Complete" on the blank template!
+			hasAiCodeChanges := r.executor != nil && r.executor.HasCodeChanges()
+			if hasAiCodeChanges {
 				session.SetFilesChanged(true)
 				r.logger.WithFields(logrus.Fields{
 					"session_id":    session.ID,
 					"iteration":     iterationsRun,
 					"files_changed": true,
 					"error":         err.Error(),
-				}).Warn("AI provider rate limited/errored after AI modified files; completing session gracefully")
+				}).Warn("AI provider rate limited/errored after AI modified website code; completing session gracefully")
 
 				// Compile Vite build into dist/ so preview works immediately
 				if r.executor != nil {
@@ -770,24 +771,28 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 		// Check if done (no tool calls)
 		if len(response.ToolCalls) == 0 {
-			// If it's early in the session and no files have been modified yet, nudge the AI to use its tools
-			if !emptyResponseNudged && !r.executor.HasFileChanges() && iterationsRun <= 2 {
-				emptyResponseNudged = true
+			// If no website source code was actually created/edited yet AND the workspace still has the unedited starter template
+			// (or the AI only ran readFile / updateSiteMemory without writing code), strongly nudge it to build the actual website!
+			hasCodeChanges := r.executor != nil && r.executor.HasCodeChanges()
+			isUneditedStarter := !executor.WorkspaceHasCustomizedApp(r.executor.GetWorkspacePath())
+			if !hasCodeChanges && noCodeNudges < 2 && (isUneditedStarter || iterationsRun <= 4) {
+				noCodeNudges++
 				r.logger.WithFields(logrus.Fields{
-					"session_id": session.ID,
-					"iteration":  iterationsRun,
-				}).Debug("AI returned no tool calls without making changes, nudging to execute tools")
+					"session_id":      session.ID,
+					"iteration":       iterationsRun,
+					"nudge_attempt":   noCodeNudges,
+					"unedited_starts": isUneditedStarter,
+				}).Warn("AI returned no tool calls without modifying any website source files, nudging to generate code")
 
 				messages = append(messages, models.Message{
-					Role:    "user",
-					Content: "You are an autonomous website builder agent. You have not executed any tools or created any website files yet. You MUST read template.json and execute tool calls (e.g. readFile, createFile, editFile) to build the website requested by the user.",
+					Role: "user",
+					Content: "STOP: You have NOT created or edited any website source files yet (such as src/custom.css or src/pages/Home.tsx). Reading files or saving site memory alone does NOT build the website! Immediately call createFile in parallel to write src/custom.css (custom palette/typography) and src/pages/Home.tsx (complete website with sticky Navbar, Hero with photo, all requested sections, unique images, and multi-column Footer), then call verifyBuild.",
 				})
 				continue
 			}
 
 			// If AI returned an empty response (no content, no tool calls), nudge it once
-			// to provide a final summary. This happens when AI templates already satisfy the
-			// goal and the AI has nothing to change but also doesn't send a closing message.
+			// to provide a final summary.
 			if response.Content == "" && !emptyResponseNudged {
 				emptyResponseNudged = true
 				r.logger.WithFields(logrus.Fields{
@@ -1119,13 +1124,13 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 		// Handle graceful exit due to circuit breaker
 		if shouldExit {
-			hasChanges := r.executor.HasFileChanges() || session.GetFilesChanged()
-			session.SetFilesChanged(hasChanges)
+			hasCodeChanges := r.executor != nil && r.executor.HasCodeChanges()
+			session.SetFilesChanged(hasCodeChanges)
 			session.SetStatus(models.StatusCompleted)
 			streamer.SendStatus("circuit_breaker", "Stopping session cleanly")
 
 			exitMsg := "I encountered repeated errors and couldn't complete the task. Please try again with a simpler request or review the changes made so far."
-			if hasChanges {
+			if hasCodeChanges {
 				// Ensure build is compiled into dist/ so preview works immediately
 				if r.executor != nil && !executor.IsDistUpToDate(session.GetWorkspacePath()) {
 					bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil)
@@ -1140,7 +1145,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			completeData := models.CompleteData{
 				Iterations:       iterationsRun,
 				TokensUsed:       session.TokensUsed,
-				FilesChanged:     hasChanges,
+				FilesChanged:     hasCodeChanges,
 				Message:          exitMsg,
 				BuildStatus:      session.GetBuildStatus(),
 				BuildMessage:     session.GetBuildMessage(),
@@ -1350,25 +1355,34 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		}
 	}
 
-	// Sync file changes to session so IsBuildRequired() reads the correct value
-	// OR with session flag to preserve pre-agent changes (e.g. template initialization)
-	hasChanges := r.executor.HasFileChanges() || session.GetFilesChanged()
-	session.SetFilesChanged(hasChanges)
+	// Track whether the AI actually modified website code in this run
+	hasCodeChanges := r.executor != nil && r.executor.HasCodeChanges()
+	hasChanges := hasCodeChanges || (r.executor != nil && r.executor.HasFileChanges()) || session.GetFilesChanged()
+	session.SetFilesChanged(hasCodeChanges)
 
-	// Ensure build is compiled into dist/ before completion so preview and R2 upload are instantaneous
-	if hasChanges {
+	// Only compile & show "Website Build Complete!" when actual website source code was created/edited.
+	// If the AI never modified any source files and the workspace is still the untouched starter template,
+	// do NOT pretend the website was built!
+	if hasCodeChanges {
 		bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil)
 		if bErr == nil && bResult != nil {
 			session.SetBuildResult(bResult.Success, bResult.Content)
 		}
-	}
-
-	// Send the AI's final response as a message with rich build summary
-	if hasChanges {
 		lastAIContent = r.synthesizeBuildSummary(session.GetWorkspacePath(), session, lastAIContent)
 		streamer.SendMessage(lastAIContent)
+	} else if !executor.WorkspaceHasCustomizedApp(session.GetWorkspacePath()) {
+		session.SetStatus(models.StatusFailed)
+		failMsg := "The AI did not generate any website code for your request (the starter template was not modified). Please try again or switch to a different model in AI Providers."
+		if strings.TrimSpace(lastAIContent) != "" {
+			failMsg = strings.TrimSpace(lastAIContent) + "\n\n*(Note: No website files were modified yet. Please resend your build instructions to generate the website.)*"
+		}
+		session.Error = failMsg
+		lastAIContent = failMsg
+		streamer.SendStatus("failed", "AI did not generate website files")
+		streamer.SendMessage(lastAIContent)
+		streamer.SendError("AI finished without writing website code")
 	} else if lastAIContent == "" {
-		lastAIContent = "I've reviewed your request. Please specify which pages or components you'd like to create."
+		lastAIContent = "I've reviewed your request. Please specify which pages or components you'd like to update."
 		streamer.SendMessage(lastAIContent)
 	} else {
 		streamer.SendMessage(lastAIContent)
@@ -1381,7 +1395,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 	streamer.SendComplete(models.CompleteData{
 		Iterations:       session.Iterations,
 		TokensUsed:       session.TokensUsed,
-		FilesChanged:     hasChanges,
+		FilesChanged:     hasCodeChanges,
 		Message:          lastAIContent,
 		BuildStatus:      session.GetBuildStatus(),
 		BuildMessage:     session.GetBuildMessage(),
@@ -1393,7 +1407,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 	// Log session complete with visual separator
 	status := string(session.GetStatus())
-	logging.LogSessionEnd(r.logger, session.ID, session.Iterations, session.TokensUsed, r.executor.HasFileChanges(), status)
+	logging.LogSessionEnd(r.logger, session.ID, session.Iterations, session.TokensUsed, hasChanges && hasCodeChanges, status)
 
 	return nil
 }

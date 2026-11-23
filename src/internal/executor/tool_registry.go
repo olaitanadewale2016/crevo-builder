@@ -53,11 +53,30 @@ func IsWriteTool(toolName string) bool {
 }
 
 // IsFileModifying returns true if the tool creates, edits, deletes, or extracts files.
-// Used by Execute() to track whether a build should be triggered after session completion.
+// Used by Execute() to track whether a workspace file was mutated.
 func IsFileModifying(toolName string) bool {
 	switch toolName {
 	case "createFile", "writeFile", "editFile", "batchEditFiles", "deleteFile", "useTemplate",
 		"writeDesignIntelligence", "updateSiteMemory", "generateAEO":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsCodeModifying returns true ONLY when the tool directly creates, edits, or deletes website source/asset files
+// (excluding metadata-only tools like updateSiteMemory, writeDesignIntelligence, useTemplate, and generateAEO).
+func IsCodeModifying(toolName string, args map[string]interface{}) bool {
+	switch toolName {
+	case "createFile", "writeFile", "editFile", "deleteFile":
+		if pathVal, ok := args["path"].(string); ok {
+			p := pathVal
+			if p == "memory.json" || p == "design-intelligence.json" || p == "template.json" {
+				return false
+			}
+		}
+		return true
+	case "batchEditFiles":
 		return true
 	default:
 		return false

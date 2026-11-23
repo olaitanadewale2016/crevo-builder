@@ -543,18 +543,28 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					strings.Contains(lowerErr, "daily limit")
 
 				// Only fail over to another model if it is an actual 24h daily quota exhaustion
-				if isTrueDailyLimit && modelIdx < len(modelsToTry)-1 {
-					if c.logger != nil {
-						c.logger.Warnf("Model %s exhausted daily quota, failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
+				if isTrueDailyLimit {
+					if modelIdx < len(modelsToTry)-1 {
+						if c.logger != nil {
+							c.logger.Warnf("Model %s exhausted daily quota, failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
+						}
 					}
+					break
+				}
+
+				// Cap 429 retry attempts to 3 retries (4 total attempts, ~45s max) so builds never stall for 160s+
+				if attempt >= 3 {
 					break
 				}
 
 				// Extract retry delay from header, JSON details (e.g. Google's retryDelay), or adaptive backoff
 				sleepDuration := extractRetryDelay(httpResp.Header.Get("Retry-After"), bodyBytes, attempt)
+				if sleepDuration > 18*time.Second {
+					sleepDuration = 18 * time.Second
+				}
 
 				if c.logger != nil {
-					c.logger.Warnf("Model %s rate limited (429). Waiting %v before attempt %d/%d (upstream: %s)", candidateModel, sleepDuration, attempt+2, maxAttempts, errMsg)
+					c.logger.Warnf("Model %s rate limited (429). Waiting %v before attempt %d/4 (upstream: %s)", candidateModel, sleepDuration, attempt+2, errMsg)
 				}
 				select {
 				case <-ctx.Done():

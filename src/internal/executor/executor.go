@@ -40,7 +40,8 @@ type Executor struct {
 	serverKey     string
 	laravelURL    string
 	fileChanges   bool
-	fileChangesMu sync.Mutex   // Separate mutex for fileChanges to avoid deadlock
+	codeChanges   bool
+	fileChangesMu sync.Mutex   // Separate mutex for fileChanges/codeChanges to avoid deadlock
 	mu            sync.RWMutex // Main mutex for batch execution coordination
 	depsMu        sync.Mutex   // Guards depsInstalled flag
 	depsInstalled bool         // Whether npm install has been run
@@ -105,6 +106,14 @@ func (e *Executor) HasFileChanges() bool {
 	return e.fileChanges
 }
 
+// HasCodeChanges returns true ONLY if actual website source/asset files were created, edited, or deleted
+// (excludes metadata-only writes like updateSiteMemory / writeDesignIntelligence / useTemplate)
+func (e *Executor) HasCodeChanges() bool {
+	e.fileChangesMu.Lock()
+	defer e.fileChangesMu.Unlock()
+	return e.codeChanges
+}
+
 // GetServerKey returns the server key for Laravel API calls
 func (e *Executor) GetServerKey() string {
 	return e.serverKey
@@ -115,6 +124,7 @@ func (e *Executor) ResetFileChanges() {
 	e.fileChangesMu.Lock()
 	defer e.fileChangesMu.Unlock()
 	e.fileChanges = false
+	e.codeChanges = false
 }
 
 // ensureDependenciesInstalled runs npm install if package.json exists but node_modules doesn't.
@@ -193,10 +203,14 @@ func (e *Executor) Execute(ctx context.Context, toolName string, args map[string
 		}
 
 		if err == nil {
-			// Track file-modifying operations (only if successful)
+			// Track file-modifying and real code-modifying operations (only if successful)
 			if result.Success && IsFileModifying(toolName) {
+				isCode := IsCodeModifying(toolName, args)
 				e.fileChangesMu.Lock()
 				e.fileChanges = true
+				if isCode {
+					e.codeChanges = true
+				}
 				e.fileChangesMu.Unlock()
 			}
 			result.DurationMs = time.Since(startTime).Milliseconds()
@@ -317,7 +331,7 @@ func (e *Executor) executeTool(ctx context.Context, toolName string, args map[st
 		if e.template == nil {
 			return nil, fmt.Errorf("template support not configured")
 		}
-		if workspaceHasCustomizedApp(e.file.workspacePath) {
+		if WorkspaceHasCustomizedApp(e.file.workspacePath) {
 			return &ToolResult{
 				Success: false,
 				Content: "Workspace already contains an existing customized website. NEVER call useTemplate on an existing website — use readFile and editFile to make targeted changes instead.",
@@ -878,9 +892,10 @@ func generateThemeCSSBlock(vars map[string]string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// workspaceHasCustomizedApp returns true when the workspace already contains a customized
-// application beyond the unedited starter template, preventing accidental wipes via useTemplate.
-func workspaceHasCustomizedApp(workspacePath string) bool {
+// WorkspaceHasCustomizedApp returns true when the workspace already contains a customized
+// application beyond the unedited starter template, preventing accidental wipes via useTemplate
+// and catching builds that never modified the starter template.
+func WorkspaceHasCustomizedApp(workspacePath string) bool {
 	pagesDir := filepath.Join(workspacePath, "src", "pages")
 	entries, err := os.ReadDir(pagesDir)
 	if err == nil {

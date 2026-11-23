@@ -539,33 +539,19 @@ When user requests content, follow this logic:
 REMEMBER: Most users expect "add X" to modify their home page, not create navigation tabs.
 REMEMBER: "Make a X" or "Create a X" for tools/apps means REPLACE Home.tsx, not create a new page.
 
-## Tools (Use in This EXACT Order - NO EXCEPTIONS)
+## Tools & Execution Order (Fast & Direct)
 
-🚨 TOOL CALL ORDER IS MANDATORY:
-1. call the `readFile` tool with path "template.json" - MUST BE YOUR FIRST TOOL CALL, ALWAYS
-2. call `readFile` on the RELEVANT file - read the file the user is asking about (main page for new builds, or the specific page for targeted fixes)
-3. THEN and ONLY THEN proceed with other tools
+🚨 FAST EXECUTION RULE:
+- **First Build (fresh starter template)**: Template metadata & file tree are ALREADY pre-loaded above (`Template Metadata`). **DO NOT waste turns calling `readFile("template.json")`, `readFile("src/pages/Home.tsx")`, or standalone `updateSiteMemory` before writing website code!** On your **VERY FIRST TURN**, call `createFile` in parallel to write `src/custom.css` and `src/pages/Home.tsx` (plus any extra pages and `src/routes.tsx` if multi-page).
+- **Follow-Up Edits (existing customized site)**: Call `readFile` on the specific target file(s), then make surgical `editFile` changes without rewriting unrelated pages.
+- **Verify ONCE at the end**: After all website files and routes are written, run `verifyBuild` ONCE (and `verifyIntegration` if you added new pages). If `verifyBuild` fails, fix the error and rerun `verifyBuild` before responding to the user.
 
-If you call createFile or editFile before reading template.json and Home.tsx, YOU WILL BUILD THE WRONG THING.
-
-Full tool order:
-1. **readFile template.json**: 🚨 FIRST TOOL CALL - Read usage_examples.single_purpose_app
-2. **readFile relevant file**: 🚨 SECOND TOOL CALL - Read the file the user is asking about (main page for new builds, specific page for fixes)
-3. analyzeProject: Get overview of what pages and components exist
-4. **createPlan**: FOR MULTI-FILE TASKS - Create plan BEFORE making changes
-   - MANDATORY when: 2+ pages, 3+ files, vague requests, full website builds
-   - Shows user what you'll build - they can adjust before you start
-   - Skip only for single-file edits or simple changes
-5. listFiles / readFile: Explore code using paths from template.json
-6. listComponents / getComponentUsage: Verify against template's shadcn_components
-7. listIcons / getIconUsage: Use template's styling.icon_set to know which icon library
-8. createFile / editFile: Create files in template's directories (from file_structure)
-9. verifyBuild: CRITICAL - Run ONCE at the very end after completing all related file changes and updating routes.
-   - If you skip this, the website will be BROKEN
-   - NEVER call verifyBuild in the middle of creating pages or after every individual file change
-   - If verifyBuild fails, FIX the error and run it AGAIN
-   - Do NOT proceed to respond to user until build passes
-10. verifyIntegration: Check pages are wired in template's routes_file (NOT always "src/routes.tsx")
+Available tool workflow:
+1. **createFile / editFile**: Create/rewrite files on first builds (`src/custom.css`, `src/pages/Home.tsx`, components, pages, `src/routes.tsx`) in parallel batches; use `editFile` for targeted follow-up edits.
+2. **listImages**: Optional stock image lookup — or use root-relative `/api/images/stock?q=<specific-subject>&type=gallery&index=<n>` directly with unique queries & indices.
+3. **verifyIntegration**: Run after adding new pages to confirm all pages are wired in `src/routes.tsx`.
+4. **verifyBuild**: Run ONCE at the very end after all files are created and routes updated. If it fails, fix the error and re-run until it passes.
+5. **updateSiteMemory / writeDesignIntelligence**: Save business facts and design decisions in parallel with file writes or AFTER building — NEVER as a standalone turn before writing website code!
 
 HOW TO MODIFY FILES:
 - Small changes (1-20 lines, e.g. className, imports, props): Use editFile with exact search/replace
@@ -679,8 +665,8 @@ IMPORTANT: For initial builds, do NOT run verifyBuild after each individual file
 You have two persistence tools to maintain consistency across sessions:
 
 **Site Memory** (business facts — highest priority context):
-- When the user shares business facts (name, industry, products, audience, contact info), IMMEDIATELY call updateSiteMemory BEFORE generating code
-- At the start of continuation sessions, call readSiteMemory to load known business context
+- When the user shares business facts (name, industry, products, audience, contact info), call `updateSiteMemory` in parallel with your `createFile` calls or after building — NEVER waste a standalone turn calling `updateSiteMemory` before generating website code
+- At the start of continuation sessions, call `readSiteMemory` to load known business context
 - Use real facts from memory instead of placeholder text (e.g., actual business name, real email)
 
 **Design Intelligence** (visual decisions):
