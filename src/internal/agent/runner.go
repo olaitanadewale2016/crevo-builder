@@ -612,17 +612,18 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 				return ctx.Err()
 			}
 
-			// If rate limited or provider error, but we ALREADY generated files in this session!
-			// Complete the build gracefully so the user doesn't lose the created site.
-			hasChanges := (r.executor != nil && r.executor.HasFileChanges()) || session.GetFilesChanged()
-			if hasChanges {
+			// Only complete gracefully if the AI ACTUALLY created or edited workspace files during this run.
+			// Do NOT treat initial template extraction (session.GetFilesChanged()) as AI progress —
+			// otherwise Iteration-1 AI provider errors get swallowed and build an unmodified starter template!
+			hasAiChanges := r.executor != nil && r.executor.HasFileChanges()
+			if hasAiChanges {
 				session.SetFilesChanged(true)
 				r.logger.WithFields(logrus.Fields{
 					"session_id":    session.ID,
 					"iteration":     iterationsRun,
 					"files_changed": true,
 					"error":         err.Error(),
-				}).Warn("AI provider rate limited/errored after files were generated; completing session gracefully")
+				}).Warn("AI provider rate limited/errored after AI modified files; completing session gracefully")
 
 				// Compile Vite build into dist/ so preview works immediately
 				if r.executor != nil {

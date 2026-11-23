@@ -1040,6 +1040,15 @@ func (s *Server) handleChat(c *gin.Context) {
 		return
 	}
 
+	// Update AI provider config if provided so admin provider/base_url/model switches apply immediately
+	if req.Config != nil {
+		if err := req.Config.Validate(); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+			return
+		}
+		session.SetConfig(req.Config)
+	}
+
 	// Reinitialize streamer for the new conversation turn using stored server key
 	webhookNotifier := webhook.NewNotifier(
 		session.GetWebhookURL(),

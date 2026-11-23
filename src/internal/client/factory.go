@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"crevo-builder/internal/client/anthropic"
@@ -41,29 +42,44 @@ func NewFactory(logger *logrus.Logger, retryConfig models.RetryConfig, onRetry m
 	}
 }
 
+// isExplicitOpenAIEndpoint returns true when a custom base URL clearly targets an OpenAI-compatible API
+func isExplicitOpenAIEndpoint(baseURL string) bool {
+	lower := strings.ToLower(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	return strings.HasSuffix(lower, "/chat/completions") ||
+		strings.Contains(lower, "/openai") ||
+		strings.Contains(lower, "openrouter.ai")
+}
+
 // CreateProvider creates an AI provider based on the config type
 func (f *Factory) CreateProvider(cfg models.ProviderConfig) (models.AIProvider, error) {
+	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
+	cfg.Model = strings.TrimSpace(cfg.Model)
 	providerType := ProviderType(cfg.ProviderType)
 
-	switch providerType {
-	case ProviderTypeOpenAI:
-		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
-	case ProviderTypeAnthropic:
-		// Convert models.RetryConfig to anthropic.RetryConfig
+	newAnthropicClient := func(c models.ProviderConfig) models.AIProvider {
 		anthropicRetryConfig := anthropic.RetryConfig{
 			MaxRetries:    f.retryConfig.MaxRetries,
 			InitialDelay:  f.retryConfig.InitialDelay,
 			BackoffFactor: f.retryConfig.BackoffFactor,
 			Jitter:        f.retryConfig.Jitter,
 		}
-		// Convert models.RetryCallback to anthropic.RetryCallback
 		var anthropicOnRetry anthropic.RetryCallback
 		if f.onRetry != nil {
 			anthropicOnRetry = func(attempt, maxRetries int, delay time.Duration, reason string) {
 				f.onRetry(attempt, maxRetries, delay, fmt.Errorf("retry: %s", reason))
 			}
 		}
-		return anthropic.NewClientWithRetry(cfg, f.logger, anthropicRetryConfig, anthropicOnRetry), nil
+		return anthropic.NewClientWithRetry(c, f.logger, anthropicRetryConfig, anthropicOnRetry)
+	}
+
+	switch providerType {
+	case ProviderTypeOpenAI:
+		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
+	case ProviderTypeAnthropic:
+		if cfg.BaseURL != "" && isExplicitOpenAIEndpoint(cfg.BaseURL) {
+			return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
+		}
+		return newAnthropicClient(cfg), nil
 	case ProviderTypeGrok:
 		// Grok uses OpenAI-compatible API
 		if cfg.BaseURL == "" {
@@ -77,47 +93,29 @@ func (f *Factory) CreateProvider(cfg models.ProviderConfig) (models.AIProvider, 
 		}
 		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 	case ProviderTypeZhipu:
-		// ZhipuAI uses Anthropic-compatible API via z.ai proxy
+		// ZhipuAI defaults to Anthropic-compatible z.ai proxy, or OpenAI-compatible if custom non-Anthropic base URL is configured
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = "https://api.z.ai/api/anthropic"
 		}
 		if cfg.Model == "" {
 			cfg.Model = "glm-4.7"
 		}
-		anthropicRetryConfig := anthropic.RetryConfig{
-			MaxRetries:    f.retryConfig.MaxRetries,
-			InitialDelay:  f.retryConfig.InitialDelay,
-			BackoffFactor: f.retryConfig.BackoffFactor,
-			Jitter:        f.retryConfig.Jitter,
+		if !strings.Contains(strings.ToLower(cfg.BaseURL), "anthropic") {
+			return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 		}
-		var anthropicOnRetry anthropic.RetryCallback
-		if f.onRetry != nil {
-			anthropicOnRetry = func(attempt, maxRetries int, delay time.Duration, reason string) {
-				f.onRetry(attempt, maxRetries, delay, fmt.Errorf("retry: %s", reason))
-			}
-		}
-		return anthropic.NewClientWithRetry(cfg, f.logger, anthropicRetryConfig, anthropicOnRetry), nil
+		return newAnthropicClient(cfg), nil
 	case ProviderTypeAbhibots:
-		// Abhibots uses Anthropic-compatible API via opus.abhibots.com
+		// Abhibots defaults to Anthropic-compatible API via opus.abhibots.com
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = "https://opus.abhibots.com"
 		}
 		if cfg.Model == "" {
 			cfg.Model = "claude-sonnet-5"
 		}
-		anthropicRetryConfig := anthropic.RetryConfig{
-			MaxRetries:    f.retryConfig.MaxRetries,
-			InitialDelay:  f.retryConfig.InitialDelay,
-			BackoffFactor: f.retryConfig.BackoffFactor,
-			Jitter:        f.retryConfig.Jitter,
+		if isExplicitOpenAIEndpoint(cfg.BaseURL) {
+			return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 		}
-		var anthropicOnRetry anthropic.RetryCallback
-		if f.onRetry != nil {
-			anthropicOnRetry = func(attempt, maxRetries int, delay time.Duration, reason string) {
-				f.onRetry(attempt, maxRetries, delay, fmt.Errorf("retry: %s", reason))
-			}
-		}
-		return anthropic.NewClientWithRetry(cfg, f.logger, anthropicRetryConfig, anthropicOnRetry), nil
+		return newAnthropicClient(cfg), nil
 	case ProviderTypeGemini:
 		// Gemini uses OpenAI-compatible API
 		if cfg.BaseURL == "" {
@@ -137,7 +135,7 @@ func (f *Factory) CreateProvider(cfg models.ProviderConfig) (models.AIProvider, 
 		}
 		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 	default:
-		// Default to OpenAI for backwards compatibility
+		// Default to OpenAI-compatible for any custom/other provider
 		return openai.NewClientWithRetry(cfg, f.logger, f.retryConfig, f.onRetry), nil
 	}
 }

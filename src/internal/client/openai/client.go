@@ -38,13 +38,14 @@ type chatRequest struct {
 	Model               string        `json:"model"`
 	Messages            []chatMessage `json:"messages"`
 	Tools               []chatTool    `json:"tools,omitempty"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
 	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
 	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
 }
 
 type chatMessage struct {
 	Role       string         `json:"role"`
-	Content    *string        `json:"content"`
+	Content    *string        `json:"content,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
@@ -104,17 +105,18 @@ func NewClientWithConfig(cfg models.ProviderConfig, logger *logrus.Logger) *Clie
 
 // NewClientWithRetry creates a client with custom retry configuration
 func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryConfig models.RetryConfig, onRetry models.RetryCallback) *Client {
-	baseURL := cfg.BaseURL
+	baseURL := strings.TrimSpace(cfg.BaseURL)
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
+	baseURL = strings.TrimRight(baseURL, "/")
 
 	httpClient := &http.Client{
-		Timeout: 90 * time.Second,
+		Timeout: 120 * time.Second,
 	}
 
 	openaiConfig := openai.DefaultConfig(cfg.APIKey)
-	openaiConfig.BaseURL = baseURL
+	openaiConfig.BaseURL = strings.TrimSuffix(baseURL, "/chat/completions")
 	openaiConfig.HTTPClient = httpClient
 	oaiClient := openai.NewClientWithConfig(openaiConfig)
 
@@ -180,8 +182,84 @@ func getModelFallbackPool(currentModel string, baseURL string) []string {
 	return []string{"gpt-4o"}
 }
 
+// resolveChatEndpoint normalizes any OpenAI-compatible base URL into a chat completions endpoint.
+// Supports: https://host/v1, https://host/v1/, https://host/v1/chat/completions, https://host/api/v1, or bare https://host
+func resolveChatEndpoint(baseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmed == "" {
+		return "https://api.openai.com/v1/chat/completions"
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasSuffix(lower, "/chat/completions") || strings.Contains(lower, "/chat/completions?") {
+		return trimmed
+	}
+	return trimmed + "/chat/completions"
+}
+
+// buildV1FallbackEndpoint constructs a /v1/chat/completions fallback when a bare custom base URL returns 404
+func buildV1FallbackEndpoint(baseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	lower := strings.ToLower(trimmed)
+	if trimmed == "" || strings.HasSuffix(lower, "/chat/completions") || strings.HasSuffix(lower, "/v1") || strings.Contains(lower, "/v1/") {
+		return ""
+	}
+	return trimmed + "/v1/chat/completions"
+}
+
+// requiresMaxCompletionTokens returns true for OpenAI reasoning/GPT-5 models that reject max_tokens on official OpenAI
+func requiresMaxCompletionTokens(model string, baseURL string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	isOfficialOpenAI := baseURL == "" || strings.Contains(strings.ToLower(baseURL), "api.openai.com")
+	if !isOfficialOpenAI {
+		return false
+	}
+	return strings.HasPrefix(m, "o1") ||
+		strings.HasPrefix(m, "o3") ||
+		strings.HasPrefix(m, "o4") ||
+		strings.HasPrefix(m, "gpt-5")
+}
+
+// parseToolCallArguments safely parses JSON tool call arguments from any OpenAI-compatible provider,
+// tolerating empty strings, "null", whitespace, or markdown code fences on parameterless/noisy tools.
+func parseToolCallArguments(raw string) (map[string]interface{}, error) {
+	args := make(map[string]interface{})
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
+		return args, nil
+	}
+	// Strip markdown fences if a custom model wrapped JSON arguments in ```json ... ```
+	if strings.HasPrefix(trimmed, "```") {
+		if idx := strings.Index(trimmed, "\n"); idx != -1 {
+			trimmed = trimmed[idx+1:]
+		}
+		trimmed = strings.TrimSuffix(strings.TrimSpace(trimmed), "```")
+		trimmed = strings.TrimSpace(trimmed)
+	}
+	if err := json.Unmarshal([]byte(trimmed), &args); err == nil {
+		if args == nil {
+			args = make(map[string]interface{})
+		}
+		return args, nil
+	}
+	// Try extracting the outermost JSON object if the model added trailing/leading text
+	start := strings.Index(trimmed, "{")
+	end := strings.LastIndex(trimmed, "}")
+	if start != -1 && end > start {
+		if err := json.Unmarshal([]byte(trimmed[start:end+1]), &args); err == nil {
+			if args == nil {
+				args = make(map[string]interface{})
+			}
+			return args, nil
+		}
+	}
+	return nil, fmt.Errorf("failed to parse tool arguments: invalid JSON (%q)", raw)
+}
+
 // Chat sends messages and returns response with potential tool calls
 func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []models.ToolDefinition) (*models.Response, error) {
+	isGeminiEndpoint := strings.Contains(strings.ToLower(c.baseURL), "googleapis.com") ||
+		strings.Contains(strings.ToLower(c.model), "gemini")
+
 	chatMessages := make([]chatMessage, 0, len(messages))
 	for _, msg := range messages {
 		cm := chatMessage{
@@ -198,6 +276,10 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			cm.ToolCalls = make([]chatToolCall, len(msg.ToolCalls))
 			for i, tc := range msg.ToolCalls {
 				argsBytes, _ := json.Marshal(tc.Arguments)
+				var extra map[string]interface{}
+				if isGeminiEndpoint && len(tc.ExtraContent) > 0 {
+					extra = tc.ExtraContent
+				}
 				cm.ToolCalls[i] = chatToolCall{
 					ID:   tc.ID,
 					Type: "function",
@@ -205,7 +287,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 						Name:      tc.Name,
 						Arguments: string(argsBytes),
 					},
-					ExtraContent: tc.ExtraContent,
+					ExtraContent: extra,
 				}
 			}
 		}
@@ -225,7 +307,8 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 	}
 
 	modelsToTry := getModelFallbackPool(c.model, c.baseURL)
-	endpoint := fmt.Sprintf("%s/chat/completions", strings.TrimRight(c.baseURL, "/"))
+	endpoint := resolveChatEndpoint(c.baseURL)
+	v1Fallback := buildV1FallbackEndpoint(c.baseURL)
 
 	startTime := time.Now()
 
@@ -235,10 +318,14 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 
 	for modelIdx, candidateModel := range modelsToTry {
 		reqPayload := chatRequest{
-			Model:               candidateModel,
-			MaxCompletionTokens: c.maxTokens,
-			Messages:            chatMessages,
-			Tools:               chatTools,
+			Model:    candidateModel,
+			Messages: chatMessages,
+			Tools:    chatTools,
+		}
+		if requiresMaxCompletionTokens(candidateModel, c.baseURL) {
+			reqPayload.MaxCompletionTokens = c.maxTokens
+		} else if c.maxTokens > 0 {
+			reqPayload.MaxTokens = c.maxTokens
 		}
 		if c.reasoningEffort != "" && supportsReasoningEffort(candidateModel) {
 			reqPayload.ReasoningEffort = c.reasoningEffort
@@ -255,13 +342,20 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		if c.logger != nil {
 			c.logger.WithFields(logrus.Fields{
 				"model":      candidateModel,
+				"endpoint":   endpoint,
 				"messages":   len(messages),
 				"max_tokens": c.maxTokens,
 			}).Debug("Sending chat request")
 		}
 
-		maxAttempts := 5
+		maxAttempts := 6
 		reasoningStripped := false
+		tokenFieldSwapped := false
+		tokenCapStripped := false
+		extraContentStripped := false
+		v1Retried := false
+		activeEndpoint := endpoint
+
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			select {
 			case <-ctx.Done():
@@ -269,14 +363,20 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			default:
 			}
 
-			httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBodyBytes))
+			httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", activeEndpoint, bytes.NewReader(reqBodyBytes))
 			if reqErr != nil {
 				lastErr = reqErr
 				break
 			}
 			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Accept", "application/json")
+			httpReq.Header.Set("User-Agent", models.HTTPUserAgent)
 			if c.apiKey != "" {
 				httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+			}
+			if strings.Contains(strings.ToLower(activeEndpoint), "openrouter.ai") {
+				httpReq.Header.Set("HTTP-Referer", "https://crevoai.com")
+				httpReq.Header.Set("X-Title", "Crevo")
 			}
 
 			httpResp, doErr := c.httpClient.Do(httpReq)
@@ -294,9 +394,19 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			}
 
 			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				trimmedBody := strings.TrimSpace(string(bodyBytes))
+				if strings.HasPrefix(strings.ToLower(trimmedBody), "<!doctype") || strings.HasPrefix(strings.ToLower(trimmedBody), "<html") {
+					lastErr = fmt.Errorf("invalid API base URL (%s): endpoint returned HTML instead of JSON", activeEndpoint)
+					if !v1Retried && v1Fallback != "" {
+						v1Retried = true
+						activeEndpoint = v1Fallback
+						continue
+					}
+					break
+				}
 				var cr chatResponse
 				if unmarshalErr := json.Unmarshal(bodyBytes, &cr); unmarshalErr != nil {
-					lastErr = fmt.Errorf("failed to decode response: %w", unmarshalErr)
+					lastErr = fmt.Errorf("failed to decode response from %s: %w", activeEndpoint, unmarshalErr)
 					continue
 				}
 
@@ -331,24 +441,93 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 				Error struct {
 					Message string `json:"message"`
 				} `json:"error"`
+				Message string `json:"message"`
+				Detail  string `json:"detail"`
 			}
 			_ = json.Unmarshal(bodyBytes, &errObj)
 			errMsg := errObj.Error.Message
 			if errMsg == "" {
+				errMsg = errObj.Message
+			}
+			if errMsg == "" {
+				errMsg = errObj.Detail
+			}
+			if errMsg == "" {
 				errMsg = string(bodyBytes)
+				if len(errMsg) > 400 {
+					errMsg = errMsg[:400] + "..."
+				}
 			}
 			lastErr = fmt.Errorf("openai error: %d %s", httpResp.StatusCode, errMsg)
+			lowerErr := strings.ToLower(errMsg)
 
-			// If upstream rejected reasoning_effort with HTTP 400, strip it and retry immediately
-			if httpResp.StatusCode == 400 && reqPayload.ReasoningEffort != "" && !reasoningStripped {
-				reasoningStripped = true
-				reqPayload.ReasoningEffort = ""
-				if reBytes, mErr := json.Marshal(reqPayload); mErr == nil {
-					reqBodyBytes = reBytes
+			// If bare custom base URL returned 404 (missing /v1), automatically retry with /v1/chat/completions
+			if httpResp.StatusCode == 404 && !v1Retried && v1Fallback != "" {
+				v1Retried = true
+				activeEndpoint = v1Fallback
+				if c.logger != nil {
+					c.logger.Warnf("Endpoint %s returned 404, retrying with %s", endpoint, activeEndpoint)
+				}
+				continue
+			}
+
+			// Automatic parameter negotiation on HTTP 400 / 422 for custom OpenAI-compatible gateways
+			if httpResp.StatusCode == 400 || httpResp.StatusCode == 422 {
+				mutated := false
+
+				// 1. Strip reasoning_effort if rejected
+				if reqPayload.ReasoningEffort != "" && !reasoningStripped {
+					reasoningStripped = true
+					reqPayload.ReasoningEffort = ""
+					mutated = true
 					if c.logger != nil {
-						c.logger.Warnf("Model %s rejected reasoning_effort (400), retrying without reasoning_effort", candidateModel)
+						c.logger.Warnf("Model %s rejected reasoning_effort (%d), retrying without it", candidateModel, httpResp.StatusCode)
 					}
-					continue
+				} else if !tokenFieldSwapped && reqPayload.MaxTokens > 0 && strings.Contains(lowerErr, "max_completion_tokens") {
+					// 2a. Upstream requires max_completion_tokens instead of max_tokens (e.g. OpenAI o-series / gpt-5)
+					tokenFieldSwapped = true
+					reqPayload.MaxCompletionTokens = reqPayload.MaxTokens
+					reqPayload.MaxTokens = 0
+					mutated = true
+					if c.logger != nil {
+						c.logger.Warnf("Model %s requires max_completion_tokens, switching from max_tokens", candidateModel)
+					}
+				} else if !tokenFieldSwapped && reqPayload.MaxCompletionTokens > 0 &&
+					(strings.Contains(lowerErr, "max_completion_tokens") || strings.Contains(lowerErr, "unrecognized") || strings.Contains(lowerErr, "unknown") || strings.Contains(lowerErr, "extra_forbidden") || strings.Contains(lowerErr, "additional properties")) {
+					// 2b. Custom proxy rejects max_completion_tokens -> switch to max_tokens
+					tokenFieldSwapped = true
+					reqPayload.MaxTokens = reqPayload.MaxCompletionTokens
+					reqPayload.MaxCompletionTokens = 0
+					mutated = true
+					if c.logger != nil {
+						c.logger.Warnf("Model %s rejected max_completion_tokens, switching to max_tokens", candidateModel)
+					}
+				} else if !tokenCapStripped && (reqPayload.MaxTokens > 0 || reqPayload.MaxCompletionTokens > 0) &&
+					(strings.Contains(lowerErr, "max_tokens") || strings.Contains(lowerErr, "max_completion_tokens") || strings.Contains(lowerErr, "max output") || strings.Contains(lowerErr, "at most") || strings.Contains(lowerErr, "must be <=") || strings.Contains(lowerErr, "exceeds")) {
+					// 3. Configured max_tokens exceeds this model's output limit -> omit cap and let upstream use default
+					tokenCapStripped = true
+					reqPayload.MaxTokens = 0
+					reqPayload.MaxCompletionTokens = 0
+					mutated = true
+					if c.logger != nil {
+						c.logger.Warnf("Model %s rejected max_tokens value (%d), retrying without explicit token cap", candidateModel, c.maxTokens)
+					}
+				} else if !extraContentStripped && strings.Contains(lowerErr, "extra_content") {
+					// 4. Strip Gemini extra_content fields if upstream proxy rejects them
+					extraContentStripped = true
+					for mi := range reqPayload.Messages {
+						for ti := range reqPayload.Messages[mi].ToolCalls {
+							reqPayload.Messages[mi].ToolCalls[ti].ExtraContent = nil
+						}
+					}
+					mutated = true
+				}
+
+				if mutated {
+					if reBytes, mErr := json.Marshal(reqPayload); mErr == nil {
+						reqBodyBytes = reBytes
+						continue
+					}
 				}
 			}
 
@@ -357,11 +536,11 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			}
 
 			if httpResp.StatusCode == 429 {
-				isTrueDailyLimit := strings.Contains(strings.ToLower(errMsg), "per day") ||
-					strings.Contains(strings.ToLower(errMsg), "per-day") ||
+				isTrueDailyLimit := strings.Contains(lowerErr, "per day") ||
+					strings.Contains(lowerErr, "per-day") ||
 					strings.Contains(errMsg, "DayPerProject") ||
 					strings.Contains(errMsg, "limit: 20") ||
-					strings.Contains(strings.ToLower(errMsg), "daily limit")
+					strings.Contains(lowerErr, "daily limit")
 
 				// Only fail over to another model if it is an actual 24h daily quota exhaustion
 				if isTrueDailyLimit && modelIdx < len(modelsToTry)-1 {
@@ -448,13 +627,17 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		CompletionTokens: resp.Usage.CompletionTokens,
 	}
 
-	for _, tc := range choice.Message.ToolCalls {
-		args := make(map[string]interface{})
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			return nil, fmt.Errorf("failed to parse tool arguments: %w", err)
+	for idx, tc := range choice.Message.ToolCalls {
+		args, err := parseToolCallArguments(tc.Function.Arguments)
+		if err != nil {
+			return nil, err
+		}
+		tcID := strings.TrimSpace(tc.ID)
+		if tcID == "" {
+			tcID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), idx)
 		}
 		result.ToolCalls = append(result.ToolCalls, models.ToolCall{
-			ID:           tc.ID,
+			ID:           tcID,
 			Name:         tc.Function.Name,
 			Arguments:    args,
 			ExtraContent: tc.ExtraContent,

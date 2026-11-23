@@ -50,9 +50,10 @@ func NewSummarizer(apiKey string) *Summarizer {
 func NewSummarizerWithConfig(cfg models.ProviderConfig) *Summarizer {
 	var client *openai.Client
 
-	if cfg.BaseURL != "" {
+	if cleanBase := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"); cleanBase != "" {
+		cleanBase = strings.TrimSuffix(cleanBase, "/chat/completions")
 		openaiConfig := openai.DefaultConfig(cfg.APIKey)
-		openaiConfig.BaseURL = cfg.BaseURL
+		openaiConfig.BaseURL = cleanBase
 		client = openai.NewClientWithConfig(openaiConfig)
 	} else {
 		client = openai.NewClient(cfg.APIKey)

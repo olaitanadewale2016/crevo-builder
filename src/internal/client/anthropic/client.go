@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
@@ -59,6 +60,22 @@ type Client struct {
 // Ensure Client implements AIProvider
 var _ models.AIProvider = (*Client)(nil)
 
+// normalizeAnthropicBaseURL strips trailing slashes and /v1/messages or /v1 suffixes
+// because anthropic-sdk-go automatically appends /v1/messages to the configured BaseURL.
+func normalizeAnthropicBaseURL(raw string) string {
+	u := strings.TrimRight(strings.TrimSpace(raw), "/")
+	lower := strings.ToLower(u)
+	switch {
+	case strings.HasSuffix(lower, "/v1/messages"):
+		u = u[:len(u)-len("/v1/messages")]
+	case strings.HasSuffix(lower, "/messages"):
+		u = u[:len(u)-len("/messages")]
+	case strings.HasSuffix(lower, "/v1"):
+		u = u[:len(u)-len("/v1")]
+	}
+	return strings.TrimRight(u, "/")
+}
+
 // NewClientWithRetry creates a client with custom retry configuration
 func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryConfig RetryConfig, onRetry RetryCallback) *Client {
 	// Build request options from config (like OpenAI client does)
@@ -67,22 +84,27 @@ func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryC
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	}
-	if cfg.BaseURL != "" {
-		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	normalizedBaseURL := normalizeAnthropicBaseURL(cfg.BaseURL)
+	if normalizedBaseURL != "" {
+		opts = append(opts, option.WithBaseURL(normalizedBaseURL))
 	}
-	opts = append(opts, option.WithRequestTimeout(90*time.Second))
+	opts = append(opts, option.WithRequestTimeout(120*time.Second))
 
 	// Create client with options
 	anthropicClient := anthropic.NewClient(opts...)
 
-	// Resolve model name from Laravel format to SDK format
-	model := cfg.Model
+	// Resolve model name
+	model := strings.TrimSpace(cfg.Model)
 	if model == "" {
 		model = ModelClaudeSonnet45 // Default to sonnet 4.5
 	}
-	// Apply model mapping if needed
-	if mappedModel, ok := modelMappings[model]; ok {
-		model = mappedModel
+	// Only remap short Anthropic aliases when talking directly to official api.anthropic.com;
+	// preserve exact model IDs for custom base URLs and third-party proxies.
+	isOfficialAnthropic := normalizedBaseURL == "" || strings.Contains(strings.ToLower(normalizedBaseURL), "api.anthropic.com")
+	if isOfficialAnthropic {
+		if mappedModel, ok := modelMappings[model]; ok {
+			model = mappedModel
+		}
 	}
 
 	maxTokens := cfg.MaxTokens
