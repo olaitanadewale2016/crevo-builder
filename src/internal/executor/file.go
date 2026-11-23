@@ -207,6 +207,7 @@ func (e *FileExecutor) validateTypeScript(ctx context.Context, filePath string) 
 	cmdArgs := append(prefix, relPath, "--loader:.tsx=tsx", "--loader:.ts=ts", "--outfile=/dev/null")
 	cmd := exec.CommandContext(validateCtx, bin, cmdArgs...)
 	cmd.Dir = e.workspacePath
+	cmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=128")
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

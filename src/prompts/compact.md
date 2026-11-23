@@ -30,6 +30,8 @@ Every file in this project is TypeScript React (.tsx/.ts). You MUST write valid 
 - Every `{` must have a matching `}` — count brackets before submitting
 - Every `(` must have a matching `)`, every `<` must have a matching `>`
 - Every component must have exactly ONE default export
+- NEVER render `<BrowserRouter>` or `<Router>` inside pages/components (`src/main.tsx` already provides it — nesting crashes preview!)
+- ALWAYS use NAMED imports for shadcn/ui components (`import { Button } from '../components/ui/button'`, NEVER default import)
 - className values must be properly quoted: `className="..."` — never break mid-string
 - NEVER leave unclosed JSX elements (e.g., `<Layout>` without `</Layout>`)
 - Use shadcn/ui components: listComponents/getComponentUsage before custom implementations

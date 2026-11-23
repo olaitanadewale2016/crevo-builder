@@ -679,6 +679,16 @@ func generateCSSBlock(vars map[string]string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// isWorkspaceBuilding returns true if an agent session is actively pending or running for this workspace
+func (s *Server) isWorkspaceBuilding(workspaceID string) bool {
+	session, ok := s.getSession(workspaceID)
+	if !ok || session == nil {
+		return false
+	}
+	status := session.GetStatus()
+	return status == models.StatusPending || status == models.StatusRunning
+}
+
 // POST /api/build/:session_id or /api/build-workspace/:workspace_id - Trigger a build
 func (s *Server) handleBuild(c *gin.Context) {
 	workspacePath, _, ok := s.resolveWorkspaceFromRequest(c)
@@ -712,6 +722,15 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	defer executor.BuildMu.Unlock()
 	defer debug.FreeOSMemory()
 
+	// Re-check after acquiring lock so concurrent build requests (e.g. webhook + frontend) never build twice
+	if executor.IsDistUpToDate(workspacePath) {
+		c.JSON(http.StatusOK, models.BuildResponse{
+			Success: true,
+			Message: "Build completed successfully (cached dist)",
+		})
+		return
+	}
+
 	// Ensure node_modules exists via shared cache symlink or one-time npm install
 	if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err != nil {
 		s.logger.WithError(err).Error("Failed to prepare node_modules")
@@ -721,24 +740,11 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 		return
 	}
 
-	// Run direct Vite build (skips slow tsc pass, capped to 256MB heap)
-	bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
-	cmdArgs := append(prefix, "build", "--logLevel", "error")
-	buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
-	buildCmd.Dir = workspacePath
-	nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
-	sharedNodeModules := executor.GetSharedNodeModulesPath()
-	localNodeModules := filepath.Join(workspacePath, "node_modules")
-	buildCmd.Env = append(os.Environ(),
-		"NODE_ENV=production",
-		"NODE_OPTIONS=--max-old-space-size=256",
-		fmt.Sprintf("NODE_PATH=%s:%s:%s", localNodeModules, sharedNodeModules, os.Getenv("NODE_PATH")),
-		fmt.Sprintf("PATH=%s:%s:%s", nodeBinPath, filepath.Join(sharedNodeModules, ".bin"), os.Getenv("PATH")),
-	)
-	if output, err := buildCmd.CombinedOutput(); err != nil {
-		s.logger.WithField("output", string(output)).WithError(err).Error("vite build failed")
+	// Run direct Vite build (skips slow tsc pass, capped to 192MB heap with pre-GC)
+	if output, err := executor.RunViteBuild(c.Request.Context(), workspacePath); err != nil {
+		s.logger.WithField("output", output).WithError(err).Error("vite build failed")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: fmt.Sprintf("vite build failed (%v): %s", err, string(output)),
+			Error: fmt.Sprintf("vite build failed (%v): %s", err, output),
 		})
 		return
 	}
@@ -860,37 +866,33 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 		return
 	}
 
-	// 1. Look in dist folder first (if built & up-to-date); if missing or stale on entry HTML request, build on-the-fly so we NEVER serve raw uncompiled index.html
+	// 1. Look in dist folder first.
+	// CRITICAL: NEVER trigger on-the-fly Vite builds while an AI session is actively building this workspace,
+	// and NEVER pile up queued builds on BuildMu (use TryLock + request context + double-check IsDistUpToDate).
+	// Doing otherwise causes iframe polling to starve/deadlock the agent's verifyBuild tool!
 	distPath := filepath.Join(workspacePath, "dist")
 	distIndex := filepath.Join(distPath, "index.html")
 	isEntryRequest := reqPath == "index.html" || !strings.Contains(filepath.Base(reqPath), ".")
 	_, distStatErr := os.Stat(distIndex)
 	needsBuild := os.IsNotExist(distStatErr) || (isEntryRequest && !executor.IsDistUpToDate(workspacePath))
-	if needsBuild {
+	if needsBuild && !s.isWorkspaceBuilding(workspaceID) {
 		pkgJSON := filepath.Join(workspacePath, "package.json")
 		if _, pkgErr := os.Stat(pkgJSON); pkgErr == nil {
-			bCtx, bCancel := context.WithTimeout(context.Background(), 120*time.Second)
-			defer bCancel()
-			if err := executor.EnsureSharedNodeModules(bCtx, workspacePath); err == nil {
-				executor.BuildMu.Lock()
-				bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
-				cmdArgs := append(prefix, "build", "--logLevel", "error")
-				buildCmd := exec.CommandContext(bCtx, bin, cmdArgs...)
-				buildCmd.Dir = workspacePath
-				nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
-				sharedNodeModules := executor.GetSharedNodeModulesPath()
-				localNodeModules := filepath.Join(workspacePath, "node_modules")
-				buildCmd.Env = append(os.Environ(),
-					"NODE_ENV=production",
-					"NODE_OPTIONS=--max-old-space-size=256",
-					fmt.Sprintf("NODE_PATH=%s:%s:%s", localNodeModules, sharedNodeModules, os.Getenv("NODE_PATH")),
-					fmt.Sprintf("PATH=%s:%s:%s", nodeBinPath, filepath.Join(sharedNodeModules, ".bin"), os.Getenv("PATH")),
-				)
-				if bOut, bErr := buildCmd.CombinedOutput(); bErr != nil {
-					s.logger.WithError(bErr).WithField("output", string(bOut)).Warn("on-the-fly vite build failed in handlePreviewAsset")
-				}
-				executor.BuildMu.Unlock()
-				debug.FreeOSMemory()
+			if executor.BuildMu.TryLock() {
+				func() {
+					defer executor.BuildMu.Unlock()
+					defer debug.FreeOSMemory()
+					if executor.IsDistUpToDate(workspacePath) {
+						return
+					}
+					bCtx, bCancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+					defer bCancel()
+					if err := executor.EnsureSharedNodeModules(bCtx, workspacePath); err == nil {
+						if bOut, bErr := executor.RunViteBuild(bCtx, workspacePath); bErr != nil {
+							s.logger.WithError(bErr).WithField("output", bOut).Warn("on-the-fly vite build failed in handlePreviewAsset")
+						}
+					}
+				}()
 			}
 		}
 	}

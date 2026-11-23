@@ -260,7 +260,8 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			}).Debug("Sending chat request")
 		}
 
-		maxAttempts := 10
+		maxAttempts := 5
+		reasoningStripped := false
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			select {
 			case <-ctx.Done():
@@ -337,6 +338,19 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 				errMsg = string(bodyBytes)
 			}
 			lastErr = fmt.Errorf("openai error: %d %s", httpResp.StatusCode, errMsg)
+
+			// If upstream rejected reasoning_effort with HTTP 400, strip it and retry immediately
+			if httpResp.StatusCode == 400 && reqPayload.ReasoningEffort != "" && !reasoningStripped {
+				reasoningStripped = true
+				reqPayload.ReasoningEffort = ""
+				if reBytes, mErr := json.Marshal(reqPayload); mErr == nil {
+					reqBodyBytes = reBytes
+					if c.logger != nil {
+						c.logger.Warnf("Model %s rejected reasoning_effort (400), retrying without reasoning_effort", candidateModel)
+					}
+					continue
+				}
+			}
 
 			if c.onRetry != nil {
 				c.onRetry(attempt+1, maxAttempts, time.Second, lastErr)
@@ -551,10 +565,10 @@ func extractRetryDelay(headerVal string, bodyBytes []byte, attempt int) time.Dur
 		}
 	}
 
-	// 4. Default adaptive backoff covering the full 60s rolling rate limit window
-	backoffs := []int{8, 15, 22, 30, 40, 50, 60, 60, 60, 60}
+	// 4. Default adaptive backoff capped to avoid multi-minute silent hangs
+	backoffs := []int{6, 12, 20, 30, 40}
 	if attempt < len(backoffs) {
 		return time.Duration(backoffs[attempt]) * time.Second
 	}
-	return 60 * time.Second
+	return 40 * time.Second
 }

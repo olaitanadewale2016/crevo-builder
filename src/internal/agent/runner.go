@@ -1042,9 +1042,9 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			}
 		}
 
-		// Stream results in original order
+		// Stream results in original order (align with batchRequests, NOT response.ToolCalls, because session-level tools were handled separately)
 		for i, result := range toolResults {
-			toolName := response.ToolCalls[i].Name
+			toolName := batchRequests[i].Name
 
 			// Log tool result
 			r.logger.WithFields(logrus.Fields{
@@ -1071,6 +1071,8 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 					message = result.Content
 				} else {
 					message = "Build succeeded"
+					// Advance UI status immediately so frontend never appears stuck on "Verifying build" while AI writes final summary
+					streamer.SendAction("Finalizing", "preview & summary", "", "creating")
 				}
 				session.SetBuildResult(success, message)
 			}
@@ -1079,8 +1081,8 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		// Circuit breaker: detect repeated failures and prevent infinite loops
 		var shouldExit bool
 		for i, result := range toolResults {
-			toolName := response.ToolCalls[i].Name
-			filePath, _ := response.ToolCalls[i].Arguments["path"].(string)
+			toolName := batchRequests[i].Name
+			filePath, _ := batchRequests[i].Arguments["path"].(string)
 			if !result.Success {
 				action := circuitBreaker.RecordFileFailure(toolName, filePath, result.Content)
 				switch action {
@@ -1124,14 +1126,13 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			exitMsg := "I encountered repeated errors and couldn't complete the task. Please try again with a simpler request or review the changes made so far."
 			if hasChanges {
 				// Ensure build is compiled into dist/ so preview works immediately
-				if r.executor != nil {
+				if r.executor != nil && !executor.IsDistUpToDate(session.GetWorkspacePath()) {
 					bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil)
 					if bErr == nil && bResult != nil {
 						session.SetBuildResult(bResult.Success, bResult.Content)
 					}
 				}
 				exitMsg = r.synthesizeBuildSummary(session.GetWorkspacePath(), session, "")
-				session.SetBuildResult(true, "Files updated and saved")
 			}
 			streamer.SendMessage(exitMsg)
 

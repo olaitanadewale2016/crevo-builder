@@ -49,14 +49,14 @@ func IsReadOnly(toolName string) bool {
 // IsWriteTool returns true if the tool is a direct file write operation (create/edit/delete).
 // Used only in tests. For file change tracking (build triggers), use IsFileModifying instead.
 func IsWriteTool(toolName string) bool {
-	return toolName == "createFile" || toolName == "editFile" || toolName == "deleteFile"
+	return toolName == "createFile" || toolName == "writeFile" || toolName == "editFile" || toolName == "deleteFile"
 }
 
 // IsFileModifying returns true if the tool creates, edits, deletes, or extracts files.
 // Used by Execute() to track whether a build should be triggered after session completion.
 func IsFileModifying(toolName string) bool {
 	switch toolName {
-	case "createFile", "editFile", "batchEditFiles", "deleteFile", "useTemplate",
+	case "createFile", "writeFile", "editFile", "batchEditFiles", "deleteFile", "useTemplate",
 		"writeDesignIntelligence", "updateSiteMemory", "generateAEO":
 		return true
 	default:

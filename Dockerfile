@@ -45,6 +45,7 @@ RUN cd /tmp/template-cache && \
     mkdir -p /opt /app/storage/workspaces && \
     mv /tmp/template-cache/node_modules /opt/shared_node_modules && \
     ln -sf /opt/shared_node_modules /app/storage/workspaces/.shared_node_modules && \
+    node /opt/shared_node_modules/vite/bin/vite.js --version && \
     rm -rf /tmp/template-cache
 
 # Copy compiled binary from builder stage
@@ -62,9 +63,9 @@ ENV PORT=8080
 ENV CREVO_DEBUG=false
 
 # Render Free Tier memory optimization (512MB RAM ceiling)
-ENV NODE_OPTIONS="--max-old-space-size=192"
-ENV GOMEMLIMIT=200MiB
-ENV GOGC=60
+ENV NODE_OPTIONS="--max-old-space-size=256"
+ENV GOMEMLIMIT=160MiB
+ENV GOGC=50
 
 EXPOSE 8080
 

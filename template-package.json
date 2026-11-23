@@ -28,7 +28,7 @@
     "@radix-ui/react-switch": "^1.0.3",
     "@radix-ui/react-tooltip": "^1.0.7",
     "@radix-ui/react-progress": "^1.0.3",
-    "lucide-react": "^0.294.0",
+    "lucide-react": "^0.469.0",
     "sonner": "^1.4.0",
     "firebase": "^11.0.0",
     "zod": "^3.22.4",

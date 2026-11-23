@@ -2,11 +2,15 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,18 +37,19 @@ func NewBuildExecutor(workspacePath string, toolConfig models.ToolExecutionConfi
 	}
 }
 
-// isNodeModulesHealthy checks if node_modules contains essential packages (react, vite)
+// isNodeModulesHealthy checks that node_modules contains all essential build & runtime packages
 func isNodeModulesHealthy(nodeModulesPath string) bool {
-	if _, err := os.Stat(filepath.Join(nodeModulesPath, "vite", "bin", "vite.js")); err == nil {
-		return true
+	required := []string{
+		filepath.Join(nodeModulesPath, "vite", "bin", "vite.js"),
+		filepath.Join(nodeModulesPath, "react", "package.json"),
+		filepath.Join(nodeModulesPath, "@tailwindcss", "vite", "package.json"),
 	}
-	if _, err := os.Stat(filepath.Join(nodeModulesPath, ".bin", "vite")); err == nil {
-		return true
+	for _, p := range required {
+		if _, err := os.Stat(p); err != nil {
+			return false
+		}
 	}
-	if _, err := os.Stat(filepath.Join(nodeModulesPath, "react")); err == nil {
-		return true
-	}
-	return false
+	return true
 }
 
 // GetSharedNodeModulesPath returns the best available shared node_modules cache directory
@@ -168,6 +173,9 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 	}
 
 	if tool == "esbuild" {
+		if globalBin, err := exec.LookPath("esbuild"); err == nil {
+			return globalBin, nil
+		}
 		candidates := []string{
 			filepath.Join(workspacePath, "node_modules", "esbuild", "bin", "esbuild"),
 			filepath.Join(sharedDir, "esbuild", "bin", "esbuild"),
@@ -177,7 +185,7 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 		}
 		for _, cand := range candidates {
 			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
-				return cand, nil
+				return "node", []string{cand}
 			}
 		}
 	}
@@ -207,16 +215,57 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 	return "npx", []string{tool}
 }
 
-// IsDistUpToDate returns true if dist/index.html exists and is newer than all source files in src/ and root index.html
+// computeSourceFingerprint computes a fast deterministic hash over all workspace source file paths, sizes, and nanosecond mtimes
+func computeSourceFingerprint(workspacePath string) string {
+	var entries []string
+	rootFiles := []string{"index.html", "package.json", "vite.config.ts", "vite.config.js"}
+	for _, rf := range rootFiles {
+		if info, err := os.Stat(filepath.Join(workspacePath, rf)); err == nil && !info.IsDir() {
+			entries = append(entries, fmt.Sprintf("%s:%d:%d", rf, info.Size(), info.ModTime().UnixNano()))
+		}
+	}
+	for _, dir := range []string{"src", "public"} {
+		dirPath := filepath.Join(workspacePath, dir)
+		_ = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			rel, relErr := filepath.Rel(workspacePath, path)
+			if relErr != nil {
+				rel = path
+			}
+			entries = append(entries, fmt.Sprintf("%s:%d:%d", filepath.ToSlash(rel), info.Size(), info.ModTime().UnixNano()))
+			return nil
+		})
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// WriteBuildStamp records the current workspace source fingerprint into dist/.build_stamp
+func WriteBuildStamp(workspacePath string) {
+	stampPath := filepath.Join(workspacePath, "dist", ".build_stamp")
+	_ = os.WriteFile(stampPath, []byte(computeSourceFingerprint(workspacePath)), 0644)
+}
+
+// IsDistUpToDate returns true if dist/index.html exists and matches the current workspace source fingerprint
 func IsDistUpToDate(workspacePath string) bool {
 	distIndex := filepath.Join(workspacePath, "dist", "index.html")
 	distInfo, err := os.Stat(distIndex)
 	if err != nil {
 		return false
 	}
-	distTime := distInfo.ModTime()
 
-	if idxInfo, err := os.Stat(filepath.Join(workspacePath, "index.html")); err == nil && idxInfo.ModTime().After(distTime) {
+	// Primary check: exact source fingerprint stamp (immune to 1-second filesystem mtime granularity & file deletions)
+	stampPath := filepath.Join(workspacePath, "dist", ".build_stamp")
+	if stampBytes, sErr := os.ReadFile(stampPath); sErr == nil {
+		return strings.TrimSpace(string(stampBytes)) == computeSourceFingerprint(workspacePath)
+	}
+
+	// Fallback check when stamp does not yet exist: require source mtimes strictly older than dist/index.html
+	distTime := distInfo.ModTime()
+	if idxInfo, err := os.Stat(filepath.Join(workspacePath, "index.html")); err == nil && !idxInfo.ModTime().Before(distTime) {
 		return false
 	}
 
@@ -226,7 +275,7 @@ func IsDistUpToDate(workspacePath string) bool {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		if info.ModTime().After(distTime) {
+		if !info.ModTime().Before(distTime) {
 			upToDate = false
 			return filepath.SkipAll
 		}
@@ -235,9 +284,45 @@ func IsDistUpToDate(workspacePath string) bool {
 	return upToDate
 }
 
+// RunViteBuild runs production Vite bundling safely within 512MB RAM limits and writes the build stamp on success.
+// Callers MUST hold BuildMu before calling RunViteBuild.
+func RunViteBuild(ctx context.Context, workspacePath string) (string, error) {
+	// Release unused Go heap pages to OS BEFORE spawning Node/Vite/oxide/esbuild to prevent 512MB container OOM
+	runtime.GC()
+	debug.FreeOSMemory()
+
+	bin, prefix := ResolveToolCommand(workspacePath, "vite")
+	cmdArgs := append(prefix, "build", "--logLevel", "error")
+	viteCmd := exec.CommandContext(ctx, bin, cmdArgs...)
+	viteCmd.Dir = workspacePath
+	nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
+	sharedNodeModules := GetSharedNodeModulesPath()
+	localNodeModules := filepath.Join(workspacePath, "node_modules")
+	viteCmd.Env = append(os.Environ(),
+		"NODE_ENV=production",
+		"NODE_OPTIONS=--max-old-space-size=256",
+		fmt.Sprintf("NODE_PATH=%s:%s:%s", localNodeModules, sharedNodeModules, os.Getenv("NODE_PATH")),
+		fmt.Sprintf("PATH=%s:%s:%s", nodeBinPath, filepath.Join(sharedNodeModules, ".bin"), os.Getenv("PATH")),
+	)
+	viteOutput, viteErr := viteCmd.CombinedOutput()
+	outputStr := string(viteOutput)
+
+	if viteErr != nil {
+		return outputStr, viteErr
+	}
+
+	distIndex := filepath.Join(workspacePath, "dist", "index.html")
+	if _, statErr := os.Stat(distIndex); statErr != nil {
+		return outputStr, fmt.Errorf("vite build completed without producing dist/index.html")
+	}
+
+	WriteBuildStamp(workspacePath)
+	return outputStr, nil
+}
+
 // VerifyBuild runs fast Vite build verification (skipping slow tsc -b) and ensures dist/index.html is generated
 func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-	// Fast path: if dist/index.html is already fresh and newer than all source files, return instantly (0ms)
+	// Fast path: if dist/index.html is already fresh and matches current source fingerprint, return instantly (0ms)
 	if IsDistUpToDate(e.workspacePath) {
 		return &ToolResult{
 			Success: true,
@@ -245,7 +330,7 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 		}, nil
 	}
 
-	// Minimum 120s timeout so initial dependency installation is never killed prematurely
+	// Minimum 120s timeout so initial build is never killed prematurely
 	timeout := time.Duration(e.toolConfig.Timeout) * time.Second
 	if timeout < 120*time.Second {
 		timeout = 120 * time.Second
@@ -259,7 +344,15 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	defer BuildMu.Unlock()
 	defer debug.FreeOSMemory()
 
-	// Ensure node_modules exists via 40ms hardlink cache or shared symlink
+	// Double-check after acquiring lock in case another build just finished
+	if IsDistUpToDate(e.workspacePath) {
+		return &ToolResult{
+			Success: true,
+			Content: "Build successful! All components compiled cleanly (cached dist).",
+		}, nil
+	}
+
+	// Ensure node_modules exists via 0ms shared symlink or hardlink cache
 	if err := EnsureSharedNodeModules(ctx, e.workspacePath); err != nil {
 		return &ToolResult{
 			Success: false,
@@ -267,31 +360,13 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 		}, nil
 	}
 
-	// Run fast Vite build directly (skips slow 25s tsc -b pass while bundling production dist/ with esbuild in ~2s)
-	bin, prefix := ResolveToolCommand(e.workspacePath, "vite")
-	cmdArgs := append(prefix, "build", "--logLevel", "error")
-	viteCmd := exec.CommandContext(ctx, bin, cmdArgs...)
-	viteCmd.Dir = e.workspacePath
-	nodeBinPath := filepath.Join(e.workspacePath, "node_modules", ".bin")
-	sharedNodeModules := GetSharedNodeModulesPath()
-	localNodeModules := filepath.Join(e.workspacePath, "node_modules")
-	viteCmd.Env = append(os.Environ(),
-		"NODE_ENV=production",
-		"NODE_OPTIONS=--max-old-space-size=256",
-		fmt.Sprintf("NODE_PATH=%s:%s:%s", localNodeModules, sharedNodeModules, os.Getenv("NODE_PATH")),
-		fmt.Sprintf("PATH=%s:%s:%s", nodeBinPath, filepath.Join(sharedNodeModules, ".bin"), os.Getenv("PATH")),
-	)
-	viteOutput, viteErr := viteCmd.CombinedOutput()
-	outputStr := string(viteOutput)
-
-	distIndex := filepath.Join(e.workspacePath, "dist", "index.html")
+	// Run fast Vite build directly (skips slow tsc -b pass while bundling production dist/ with esbuild)
+	outputStr, viteErr := RunViteBuild(ctx, e.workspacePath)
 	if viteErr == nil {
-		if _, statErr := os.Stat(distIndex); statErr == nil {
-			return &ToolResult{
-				Success: true,
-				Content: "Build successful! All components compiled cleanly.",
-			}, nil
-		}
+		return &ToolResult{
+			Success: true,
+			Content: "Build successful! All components compiled cleanly.",
+		}, nil
 	}
 
 	// Return clear error summary so AI can fix any broken import or syntax error immediately

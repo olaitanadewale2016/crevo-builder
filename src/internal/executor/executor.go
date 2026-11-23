@@ -243,7 +243,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, args map[string
 // executeTool executes a single tool without retry logic
 func (e *Executor) executeTool(ctx context.Context, toolName string, args map[string]interface{}) (*ToolResult, error) {
 	// Ensure dependencies are installed before file writes (enables TypeScript validation)
-	if toolName == "createFile" || toolName == "editFile" {
+	if toolName == "createFile" || toolName == "writeFile" || toolName == "editFile" {
 		if err := e.ensureDependenciesInstalled(ctx); err != nil {
 			if e.logger != nil {
 				e.logger.WithField("error", err.Error()).Warn("ensureDependenciesInstalled failed (non-blocking)")
@@ -252,7 +252,7 @@ func (e *Executor) executeTool(ctx context.Context, toolName string, args map[st
 	}
 
 	switch toolName {
-	case "createFile":
+	case "createFile", "writeFile":
 		return e.file.CreateFile(ctx, args)
 	case "editFile":
 		return e.file.EditFile(ctx, args)
