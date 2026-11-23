@@ -115,26 +115,12 @@ func (e *FileExecutor) CreateFile(ctx context.Context, args map[string]interface
 		content = NormalizeCSSContent(content, fullPath, e.workspacePath)
 	}
 
-	// Write file
+	// Write file (skip per-file esbuild subprocess spawn here; verifyBuild compiles the full workspace once at the end)
 	e.debug("CreateFile writing file to disk")
 	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
 	e.debug("CreateFile file written successfully")
-
-	// Validate TypeScript/TSX files
-	if strings.HasSuffix(path, ".tsx") || strings.HasSuffix(path, ".ts") {
-		e.debug("CreateFile starting TypeScript validation")
-		if err := e.validateTypeScript(ctx, fullPath); err != nil {
-			e.debug("CreateFile TypeScript validation failed", "error", err.Error())
-			// Return the error but keep the file (AI can fix it)
-			return &ToolResult{
-				Success: false,
-				Content: fmt.Sprintf("File created but has errors: %s\n\nPlease fix these issues.", err.Error()),
-			}, nil
-		}
-		e.debug("CreateFile TypeScript validation passed")
-	}
 
 	e.debug("CreateFile returning success")
 	result := fmt.Sprintf("File created: %s (%d bytes)", path, len(content))

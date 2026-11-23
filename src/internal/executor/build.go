@@ -245,7 +245,12 @@ func computeSourceFingerprint(workspacePath string) string {
 			if relErr != nil {
 				rel = path
 			}
-			entries = append(entries, fmt.Sprintf("%s:%d:%d", filepath.ToSlash(rel), info.Size(), info.ModTime().UnixNano()))
+			slashRel := filepath.ToSlash(rel)
+			// Static crawler files copied directly by AEO should not invalidate the Vite JS/CSS dist stamp
+			if slashRel == "public/llms.txt" || slashRel == "public/robots.txt" || slashRel == "public/sitemap.xml" {
+				return nil
+			}
+			entries = append(entries, fmt.Sprintf("%s:%d:%d", slashRel, info.Size(), info.ModTime().UnixNano()))
 			return nil
 		})
 	}

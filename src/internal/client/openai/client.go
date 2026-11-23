@@ -347,11 +347,17 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		} else if c.maxTokens > 0 {
 			reqPayload.MaxTokens = c.maxTokens
 		}
-		if c.reasoningEffort != "" && supportsReasoningEffort(candidateModel) {
-			reqPayload.ReasoningEffort = c.reasoningEffort
-		} else if strings.Contains(strings.ToLower(candidateModel), "gemini-2.5") {
-			// For Gemini 2.5, cap reasoning_effort to "low" to avoid excessive thinking latency
-			reqPayload.ReasoningEffort = "low"
+		modelLower := strings.ToLower(candidateModel)
+		isGeminiThinking := strings.Contains(modelLower, "gemini-2.5") || strings.Contains(modelLower, "gemini-3")
+		if isGeminiThinking {
+			// Cap Gemini thinking models at "low" unless the user explicitly requested "high" reasoning
+			if strings.EqualFold(c.reasoningEffort, "high") {
+				reqPayload.ReasoningEffort = "high"
+			} else {
+				reqPayload.ReasoningEffort = "low"
+			}
+		} else if c.reasoningEffort != "" && supportsReasoningEffort(candidateModel) {
+			reqPayload.ReasoningEffort = strings.ToLower(c.reasoningEffort)
 		}
 
 		reqBodyBytes, err := json.Marshal(reqPayload)
@@ -732,7 +738,8 @@ func supportsReasoningEffort(model string) bool {
 		strings.Contains(m, "thinking") ||
 		strings.Contains(m, "reasoner") ||
 		strings.Contains(m, "grok-3-mini") ||
-		strings.Contains(m, "gemini-2.5")
+		strings.Contains(m, "gemini-2.5") ||
+		strings.Contains(m, "gemini-3")
 }
 
 // ConvertToolCallsToOpenAI converts our ToolCall to openai.ToolCall

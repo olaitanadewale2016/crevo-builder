@@ -1197,9 +1197,6 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 		}
 		if err := s.initializeWorkspaceFromTemplate(workspacePath, templateToUse, laravelURL); err != nil {
 			s.logger.WithError(err).Warnf("Template pre-initialization for '%s' failed, AI will create or fetch files: %v", templateToUse, err)
-		} else {
-			// Template was extracted — mark session so auto-build triggers
-			session.SetFilesChanged(true)
 		}
 
 		// Apply theme preset to workspace CSS if provided
@@ -1249,8 +1246,10 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 		if templateName == "" {
 			templateName = selectedTemplate // Fall back to ID if name not provided
 		}
-		initialGoal = fmt.Sprintf("%s\n\n(Note: The '%s' template has been pre-selected and initialized for this project. Read template.json and proceed.)", goal, templateName)
-	} else if !workspaceHasFiles(workspacePath) {
+		initialGoal = fmt.Sprintf("%s\n\n(Note: The '%s' template is already loaded in this workspace. Do NOT call fetchTemplates or useTemplate. Build and customize src/custom.css and src/pages/Home.tsx cleanly, then run verifyBuild.)", goal, templateName)
+	} else if workspaceHasFiles(workspacePath) {
+		initialGoal = fmt.Sprintf("%s\n\n(Note: The starter workspace is already loaded with src/pages/Home.tsx and src/custom.css. Do NOT call fetchTemplates or useTemplate. Replace src/pages/Home.tsx with the complete custom website requested by the user (keep '/' pointing to your customized homepage), style in src/custom.css, and run verifyBuild once complete.)", goal)
+	} else {
 		initialGoal = fmt.Sprintf("%s\n\n(Note: No template was pre-selected. You MUST call fetchTemplates first to see available templates, then select the most appropriate one using useTemplate before doing any other work.)", goal)
 	}
 

@@ -585,22 +585,6 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		// Send thinking event at start to begin frontend timer
 		streamer.SendThinking("", iterationsRun)
 
-		// Pacing between iterations to avoid bursting RPM rate limits (e.g. Gemini 15 RPM free tier limit)
-		if iterationsRun > 1 {
-			pacing := 1500 * time.Millisecond
-			isGemini := r.aiConfig.ProviderType == "gemini" ||
-				strings.Contains(strings.ToLower(r.aiConfig.Model), "gemini") ||
-				strings.Contains(r.aiConfig.BaseURL, "googleapis.com")
-			if isGemini {
-				pacing = 2500 * time.Millisecond
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(pacing):
-			}
-		}
-
 		// Call AI
 		response, err := provider.Chat(ctx, messages, tools)
 		if err != nil {
@@ -725,10 +709,14 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 				"limit":             session.GetRemainingCredits(),
 			}).Warn("Credit limit exceeded, stopping session")
 
-			// Send completion with credit exceeded message
-			hasChanges := r.executor.HasFileChanges() || session.GetFilesChanged()
+			// Only mark files changed / completed if the root app was actually customized beyond starter template
+			hasChanges := r.executor != nil && r.executor.HasCodeChanges() && executor.WorkspaceHasCustomizedApp(r.executor.GetWorkspacePath())
 			session.SetFilesChanged(hasChanges)
-			session.SetStatus(models.StatusCompleted)
+			if hasChanges {
+				session.SetStatus(models.StatusCompleted)
+			} else {
+				session.SetStatus(models.StatusFailed)
+			}
 			completeData := models.CompleteData{
 				Iterations:       iterationsRun,
 				TokensUsed:       session.TokensUsed,
@@ -776,22 +764,25 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 		// Check if done (no tool calls)
 		if len(response.ToolCalls) == 0 {
-			// If no website source code was actually created/edited yet AND the workspace still has the unedited starter template
-			// (or the AI only ran readFile / updateSiteMemory without writing code), strongly nudge it to build the actual website!
+			// Ensure actual customized code exists on '/' before allowing completion on a starter workspace
 			hasCodeChanges := r.executor != nil && r.executor.HasCodeChanges()
 			isUneditedStarter := !executor.WorkspaceHasCustomizedApp(r.executor.GetWorkspacePath())
-			if !hasCodeChanges && noCodeNudges < 2 && (isUneditedStarter || iterationsRun <= 4) {
+			if (!hasCodeChanges || isUneditedStarter) && noCodeNudges < 2 && (isUneditedStarter || iterationsRun <= 4) {
 				noCodeNudges++
 				r.logger.WithFields(logrus.Fields{
 					"session_id":      session.ID,
 					"iteration":       iterationsRun,
 					"nudge_attempt":   noCodeNudges,
 					"unedited_starts": isUneditedStarter,
-				}).Warn("AI returned no tool calls without modifying any website source files, nudging to generate code")
+				}).Warn("AI returned no tool calls before customizing root homepage, nudging to build website code")
 
+				nudgeMsg := "STOP: You have NOT created or edited any website source files yet (such as src/custom.css or src/pages/Home.tsx). Reading files or saving site memory alone does NOT complete the build! Use createFile/editFile to write the complete website styling and components/pages, then run verifyBuild before giving your final response."
+				if hasCodeChanges && isUneditedStarter {
+					nudgeMsg = "STOP: Your root homepage ('/') still renders the starter template placeholder ('Welcome to Your Website'). You MUST update src/pages/Home.tsx (or update the '/' route in src/routes.tsx) with the complete customized homepage requested by the user, then run verifyBuild before finishing."
+				}
 				messages = append(messages, models.Message{
-					Role: "user",
-					Content: "STOP: You have NOT created or edited any website source files yet (such as src/custom.css or src/pages/Home.tsx). Reading files or saving site memory alone does NOT complete the build! Use createFile/editFile to write the complete website styling and components/pages, then run verifyBuild before giving your final response.",
+					Role:    "user",
+					Content: nudgeMsg,
 				})
 				continue
 			}
@@ -1411,32 +1402,36 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		}
 	}
 
-	// Track whether the AI actually modified website code in this run
+	// Track whether the AI actually modified website code AND customized '/' beyond the starter template
 	hasCodeChanges := r.executor != nil && r.executor.HasCodeChanges()
-	hasChanges := hasCodeChanges || (r.executor != nil && r.executor.HasFileChanges()) || session.GetFilesChanged()
-	session.SetFilesChanged(hasCodeChanges)
+	isCustomizedApp := executor.WorkspaceHasCustomizedApp(session.GetWorkspacePath())
+	effectiveCodeChanges := hasCodeChanges && isCustomizedApp
+	hasChanges := effectiveCodeChanges || (r.executor != nil && r.executor.HasFileChanges() && isCustomizedApp)
+	session.SetFilesChanged(effectiveCodeChanges)
 
-	// Only compile & show "Website Build Complete!" when actual website source code was created/edited.
-	// If the AI never modified any source files and the workspace is still the untouched starter template,
-	// do NOT pretend the website was built!
-	if hasCodeChanges {
+	// Only compile & show "Website Build Complete!" when actual customized website code exists on '/'.
+	// If the workspace still renders the untouched starter template ("Welcome to Your Website"),
+	// mark the run failed rather than pretending or deploying a starter template preview.
+	if effectiveCodeChanges {
 		bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil)
 		if bErr == nil && bResult != nil {
 			session.SetBuildResult(bResult.Success, bResult.Content)
 		}
 		lastAIContent = r.synthesizeBuildSummary(session.GetWorkspacePath(), session, lastAIContent)
 		streamer.SendMessage(lastAIContent)
-	} else if !executor.WorkspaceHasCustomizedApp(session.GetWorkspacePath()) {
+	} else if !isCustomizedApp {
 		session.SetStatus(models.StatusFailed)
-		failMsg := "The AI did not generate any website code for your request (the starter template was not modified). Please try again or switch to a different model in AI Providers."
-		if strings.TrimSpace(lastAIContent) != "" {
-			failMsg = strings.TrimSpace(lastAIContent) + "\n\n*(Note: No website files were modified yet. Please resend your build instructions to generate the website.)*"
+		failMsg := "The AI did not generate a customized home page (the starter template was not updated). Please resend your prompt or try a different AI model."
+		if hasCodeChanges {
+			failMsg = "The AI modified helper or styling files but did not update the home page ('/'). Please resend your instructions so the full website is built."
+		} else if strings.TrimSpace(lastAIContent) != "" {
+			failMsg = strings.TrimSpace(lastAIContent) + "\n\n*(Note: No website pages were built yet. Please resend your build instructions to generate the website.)*"
 		}
 		session.Error = failMsg
 		lastAIContent = failMsg
-		streamer.SendStatus("failed", "AI did not generate website files")
+		streamer.SendStatus("failed", "AI did not customize the website home page")
 		streamer.SendMessage(lastAIContent)
-		streamer.SendError("AI finished without writing website code")
+		streamer.SendError("AI finished without customizing website home page")
 	} else if lastAIContent == "" {
 		lastAIContent = "I've reviewed your request. Please specify which pages or components you'd like to update."
 		streamer.SendMessage(lastAIContent)
@@ -1451,7 +1446,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 	streamer.SendComplete(models.CompleteData{
 		Iterations:       session.Iterations,
 		TokensUsed:       session.TokensUsed,
-		FilesChanged:     hasCodeChanges,
+		FilesChanged:     effectiveCodeChanges,
 		Message:          lastAIContent,
 		BuildStatus:      session.GetBuildStatus(),
 		BuildMessage:     session.GetBuildMessage(),
@@ -1463,7 +1458,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 	// Log session complete with visual separator
 	status := string(session.GetStatus())
-	logging.LogSessionEnd(r.logger, session.ID, session.Iterations, session.TokensUsed, hasChanges && hasCodeChanges, status)
+	logging.LogSessionEnd(r.logger, session.ID, session.Iterations, session.TokensUsed, hasChanges && effectiveCodeChanges, status)
 
 	return nil
 }

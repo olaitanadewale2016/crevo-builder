@@ -895,26 +895,40 @@ func generateThemeCSSBlock(vars map[string]string) string {
 // WorkspaceHasCustomizedApp returns true when the workspace already contains a customized
 // application beyond the unedited starter template, preventing accidental wipes via useTemplate
 // and catching builds that never modified the starter template.
+// WorkspaceHasCustomizedApp returns true when the workspace appears to have an already-customized app
+// on its root route ('/') beyond the untouched default starter template.
 func WorkspaceHasCustomizedApp(workspacePath string) bool {
 	pagesDir := filepath.Join(workspacePath, "src", "pages")
-	entries, err := os.ReadDir(pagesDir)
-	if err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			if strings.HasSuffix(name, ".tsx") && name != "Home.tsx" && name != "NotFound.tsx" {
+	homePath := filepath.Join(pagesDir, "Home.tsx")
+	if data, err := os.ReadFile(homePath); err == nil {
+		content := strings.TrimSpace(string(data))
+		if content != "" && !strings.Contains(content, "Welcome to Your Website") {
+			return true
+		}
+	}
+
+	// If Home.tsx is still the starter placeholder or missing, check whether '/' in routes.tsx
+	// maps to a different customized page component rather than leaving <Home /> untouched on '/'.
+	routesPath := filepath.Join(workspacePath, "src", "routes.tsx")
+	if routesData, err := os.ReadFile(routesPath); err == nil {
+		routesContent := string(routesData)
+		hasRootHome := (strings.Contains(routesContent, "path: '/'") || strings.Contains(routesContent, `path: "/"`)) &&
+			strings.Contains(routesContent, "<Home")
+		if !hasRootHome && strings.TrimSpace(routesContent) != "" && !strings.Contains(routesContent, "Welcome to Your Website") {
+			return true
+		}
+	}
+
+	// Custom templates that do not use src/pages/Home.tsx (e.g. App.tsx renders landing directly)
+	if _, homeErr := os.Stat(homePath); os.IsNotExist(homeErr) {
+		appPath := filepath.Join(workspacePath, "src", "App.tsx")
+		if appData, err := os.ReadFile(appPath); err == nil {
+			appContent := strings.TrimSpace(string(appData))
+			if appContent != "" && !strings.Contains(appContent, "Welcome to Your Website") {
 				return true
 			}
 		}
 	}
 
-	homePath := filepath.Join(pagesDir, "Home.tsx")
-	data, err := os.ReadFile(homePath)
-	if err != nil {
-		return false
-	}
-	content := string(data)
-	return strings.TrimSpace(content) != "" && !strings.Contains(content, "Welcome to Your Website")
+	return false
 }

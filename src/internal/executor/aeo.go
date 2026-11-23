@@ -51,6 +51,13 @@ func (e *AEOExecutor) GenerateAEO(ctx context.Context, args map[string]interface
 	}
 	generated = append(generated, "public/robots.txt")
 
+	// Mirror crawler files into dist/ immediately if already compiled so verifyBuild doesn't miss them
+	distDir := filepath.Join(e.workspacePath, "dist")
+	if info, err := os.Stat(distDir); err == nil && info.IsDir() {
+		_ = os.WriteFile(filepath.Join(distDir, "llms.txt"), []byte(llmsTxt), 0644)
+		_ = os.WriteFile(filepath.Join(distDir, "robots.txt"), []byte(robotsTxt), 0644)
+	}
+
 	// Inject JSON-LD into index.html
 	if err := e.injectJSONLD(memory); err != nil {
 		return &ToolResult{
