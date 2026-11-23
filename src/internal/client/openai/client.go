@@ -170,9 +170,8 @@ func getModelFallbackPool(currentModel string, baseURL string) []string {
 	var pool []string
 	if isGemini {
 		pool = []string{
-			"gemini-2.5-flash",
 			"gemini-2.5-flash-lite",
-			"gemini-2.5-pro",
+			"gemini-2.5-flash",
 		}
 	} else if isOpenRouter {
 		pool = []string{
@@ -311,6 +310,19 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					lastErr = fmt.Errorf("failed to decode response: %w", unmarshalErr)
 					continue
 				}
+
+				// Check if the AI provider filtered out tool calls due to malformed call format
+				if len(cr.Choices) > 0 {
+					finishReason := cr.Choices[0].FinishReason
+					if strings.Contains(finishReason, "MALFORMED_FUNCTION_CALL") && len(cr.Choices[0].Message.ToolCalls) == 0 {
+						lastErr = fmt.Errorf("AI provider filtered malformed function call: %s", finishReason)
+						if c.logger != nil {
+							c.logger.Warnf("Model %s returned malformed function call (%s), failing over", candidateModel, finishReason)
+						}
+						break // Try next model in pool
+					}
+				}
+
 				finalResp = cr
 				success = true
 				if candidateModel != c.model {
