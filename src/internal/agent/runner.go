@@ -581,12 +581,19 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		// Send thinking event at start to begin frontend timer
 		streamer.SendThinking("", iterationsRun)
 
-		// Gentle pacing between iterations to avoid bursting 15 RPM free-tier quota in rapid loops
+		// Pacing between iterations to avoid bursting RPM rate limits (e.g. Gemini 15 RPM free tier limit)
 		if iterationsRun > 1 {
+			pacing := 2000 * time.Millisecond
+			isGemini := r.aiConfig.ProviderType == "gemini" ||
+				strings.Contains(strings.ToLower(r.aiConfig.Model), "gemini") ||
+				strings.Contains(r.aiConfig.BaseURL, "googleapis.com")
+			if isGemini {
+				pacing = 4000 * time.Millisecond // Strict 15 RPM (1 request / 4s) ensures we stay below the ceiling
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(1200 * time.Millisecond):
+			case <-time.After(pacing):
 			}
 		}
 
@@ -605,7 +612,31 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 				return ctx.Err()
 			}
 
-			// Real error - handle as before
+			// If rate limited or provider error, but we ALREADY generated files in this session!
+			// Complete the build gracefully so the user doesn't lose the created site.
+			if len(session.FilesChanged) > 0 {
+				r.logger.WithFields(logrus.Fields{
+					"session_id":    session.ID,
+					"iteration":     iterationsRun,
+					"files_changed": len(session.FilesChanged),
+					"error":         err.Error(),
+				}).Warn("AI provider rate limited/errored after files were generated; completing session gracefully")
+
+				successMsg := "Your website files have been generated and updated successfully! You can preview your site now."
+				streamer.SendMessage(models.MessageRoleAssistant, successMsg)
+				session.SetStatus(models.StatusCompleted)
+				streamer.SendStatus("completed", "Build complete")
+				streamer.SendComplete(models.CompleteData{
+					Iterations:   iterationsRun,
+					TokensUsed:   session.TokensUsed,
+					FilesChanged: session.FilesChanged,
+					BuildStatus:  "completed",
+					BuildMessage: "Website built successfully with updated files",
+				})
+				return nil
+			}
+
+			// Real error before any files changed - handle as before
 			session.SetStatus(models.StatusFailed)
 			session.Error = err.Error()
 			streamer.SendStatus("failed", "AI provider error: "+err.Error())

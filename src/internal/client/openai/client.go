@@ -257,7 +257,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			}).Debug("Sending chat request")
 		}
 
-		maxAttempts := 6
+		maxAttempts := 10
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			select {
 			case <-ctx.Done():
@@ -354,22 +354,11 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					break
 				}
 
-				// Check Retry-After header first
-				var sleepDuration time.Duration
-				if raHeader := httpResp.Header.Get("Retry-After"); raHeader != "" {
-					if secs, parseErr := strconv.Atoi(strings.TrimSpace(raHeader)); parseErr == nil && secs > 0 {
-						sleepDuration = time.Duration(secs) * time.Second
-					}
-				}
-
-				// If no header or header is 0, use adaptive backoff to clear rolling 60s RPM window:
-				// Attempt 0: 5s, Attempt 1: 10s, Attempt 2: 15s, Attempt 3: 20s, Attempt 4: 25s
-				if sleepDuration <= 0 {
-					sleepDuration = time.Duration((attempt+1)*5) * time.Second
-				}
+				// Extract retry delay from header, JSON details (e.g. Google's retryDelay), or adaptive backoff
+				sleepDuration := extractRetryDelay(httpResp.Header.Get("Retry-After"), bodyBytes, attempt)
 
 				if c.logger != nil {
-					c.logger.Warnf("Model %s rate limited (429). Waiting %v before attempt %d/%d", candidateModel, sleepDuration, attempt+2, maxAttempts)
+					c.logger.Warnf("Model %s rate limited (429). Waiting %v before attempt %d/%d (upstream: %s)", candidateModel, sleepDuration, attempt+2, maxAttempts, errMsg)
 				}
 				select {
 				case <-ctx.Done():
@@ -504,4 +493,64 @@ func ConvertToolCallsToOpenAI(calls []models.ToolCall) []openai.ToolCall {
 		}
 	}
 	return result
+}
+
+// extractRetryDelay attempts to parse retry delay from headers or Gemini/OpenAI error body
+func extractRetryDelay(headerVal string, bodyBytes []byte, attempt int) time.Duration {
+	// 1. Check HTTP header (standard Retry-After)
+	if headerVal != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(headerVal)); err == nil && secs > 0 {
+			return time.Duration(secs+1) * time.Second
+		}
+	}
+
+	bodyStr := string(bodyBytes)
+
+	// 2. Check JSON details for Google RPC RetryInfo: "retryDelay": "23s"
+	var geminiErr struct {
+		Error struct {
+			Message string `json:"message"`
+			Details []struct {
+				Type       string `json:"@type"`
+				RetryDelay string `json:"retryDelay"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bodyBytes, &geminiErr); err == nil {
+		for _, d := range geminiErr.Error.Details {
+			if d.RetryDelay != "" {
+				clean := strings.TrimSuffix(strings.TrimSpace(d.RetryDelay), "s")
+				if secs, parseErr := strconv.ParseFloat(clean, 64); parseErr == nil && secs > 0 {
+					return time.Duration(secs+1.5) * time.Second
+				}
+			}
+		}
+		if geminiErr.Error.Message != "" {
+			bodyStr = geminiErr.Error.Message + " " + bodyStr
+		}
+	}
+
+	// 3. Search for "retry after X" or "retry in X"
+	lower := strings.ToLower(bodyStr)
+	if idx := strings.Index(lower, "retry after "); idx != -1 {
+		sub := lower[idx+len("retry after "):]
+		var secs int
+		if _, err := fmt.Sscanf(sub, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs+2) * time.Second
+		}
+	}
+	if idx := strings.Index(lower, "retry in "); idx != -1 {
+		sub := lower[idx+len("retry in "):]
+		var secs int
+		if _, err := fmt.Sscanf(sub, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs+2) * time.Second
+		}
+	}
+
+	// 4. Default adaptive backoff covering the full 60s rolling rate limit window
+	backoffs := []int{8, 15, 22, 30, 40, 50, 60, 60, 60, 60}
+	if attempt < len(backoffs) {
+		return time.Duration(backoffs[attempt]) * time.Second
+	}
+	return 60 * time.Second
 }
