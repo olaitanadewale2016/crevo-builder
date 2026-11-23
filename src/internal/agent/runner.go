@@ -648,10 +648,6 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 					CompletionTokens: session.CompletionTokens,
 					Model:            r.aiConfig.Model,
 				})
-					PromptTokens:     session.PromptTokens,
-					CompletionTokens: session.CompletionTokens,
-					Model:            r.aiConfig.Model,
-				})
 				return nil
 			}
 
