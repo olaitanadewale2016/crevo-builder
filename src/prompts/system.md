@@ -544,7 +544,7 @@ REMEMBER: "Make a X" or "Create a X" for tools/apps means REPLACE Home.tsx, not 
 🚨 FAST EXECUTION RULE:
 - **First Build (fresh starter template)**: Template metadata & file tree are ALREADY pre-loaded above (`Template Metadata`). **DO NOT waste turns calling `readFile("template.json")`, `readFile("src/pages/Home.tsx")`, or standalone `updateSiteMemory` before writing website code!** On your **VERY FIRST TURN**, call `createFile` in parallel to write `src/custom.css` and `src/pages/Home.tsx` (plus any extra pages and `src/routes.tsx` if multi-page).
 - **Follow-Up Edits (existing customized site)**: Call `readFile` on the specific target file(s), then make surgical `editFile` changes without rewriting unrelated pages.
-- **Verify ONCE at the end**: After all website files and routes are written, run `verifyBuild` ONCE (and `verifyIntegration` if you added new pages). If `verifyBuild` fails, fix the error and rerun `verifyBuild` before responding to the user.
+- **Verify ONCE at the end (MANDATORY)**: After all website files and routes are written, **YOU MUST run `verifyBuild` yourself** (and `verifyIntegration` if you added new pages) BEFORE giving your final response. NEVER tell the user to call `verifyBuild` or mention internal tool names! If `verifyBuild` fails, fix the error and rerun `verifyBuild`.
 
 Available tool workflow:
 1. **createFile / editFile**: Create/rewrite files on first builds (`src/custom.css`, `src/pages/Home.tsx`, components, pages, `src/routes.tsx`) in parallel batches; use `editFile` for targeted follow-up edits.

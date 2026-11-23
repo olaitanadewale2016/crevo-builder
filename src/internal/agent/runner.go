@@ -537,11 +537,14 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 	// Track last non-empty AI content for final message
 	var lastAIContent string
 
-	// Integration verification: track fix attempts and repeated errors to avoid infinite loop
+	// Integration & build verification: track fix attempts to guarantee compiled dist/ before finishing
 	integrationFixAttempts := 0
 	const maxIntegrationFixes = 2
 	var lastIntegrationError string
 	integrationFinalNotified := false // Flag to track if we've sent final notification about unresolved issues
+	buildFixAttempts := 0
+	const maxBuildFixes = 3
+	var lastBuildError string
 
 	// Empty response / no-code nudges: prevent premature completion before writing website code
 	emptyResponseNudged := false
@@ -757,8 +760,10 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			streamer.SendThinking(response.Content, iterationsRun)
 			lastAIContent = response.Content // Track for final message
 
-			// Send substantial AI content as message event for real-time display
-			if len(response.Content) > 100 {
+			// Only stream intermediate progress messages while tool calls are still in progress;
+			// final responses (len(ToolCalls)==0) are sent ONCE after verifyBuild passes so we never
+			// emit premature messages (or leak "calling verifyBuild") before preview is compiled.
+			if len(response.ToolCalls) > 0 && len(response.Content) > 100 && !strings.Contains(strings.ToLower(response.Content), "verifybuild") {
 				streamer.SendMessage(response.Content)
 			}
 
@@ -885,7 +890,58 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 				}
 			}
 
-			// No integration issues (or max fix attempts reached), we're done
+			// Mandatory build verification INSIDE the loop before completing!
+			// Even if the AI forgot to call verifyBuild (or stopped after editing code),
+			// compile now so any syntax/import error is automatically fed back to the AI to fix
+			// and dist/index.html is guaranteed ready for live preview before SendComplete fires.
+			if hasCodeChanges && !executor.IsDistUpToDate(r.executor.GetWorkspacePath()) {
+				streamer.SendAction("Verifying", "build", "", "reading")
+				streamer.SendStatus("verifying", "Verifying build...")
+
+				verifyRes, vErr := r.executor.Execute(ctx, "verifyBuild", nil)
+				buildOK := vErr == nil && verifyRes != nil && verifyRes.Success
+				if buildOK {
+					session.SetBuildResult(true, "Build succeeded")
+					streamer.SendAction("Finalizing", "preview & summary", "", "creating")
+				} else {
+					errText := "Build failed"
+					if vErr != nil {
+						errText = vErr.Error()
+					} else if verifyRes != nil && strings.TrimSpace(verifyRes.Content) != "" {
+						errText = verifyRes.Content
+					}
+					session.SetBuildResult(false, errText)
+
+					if buildFixAttempts < maxBuildFixes && errText != lastBuildError {
+						lastBuildError = errText
+						buildFixAttempts++
+						r.logger.WithFields(logrus.Fields{
+							"session_id": session.ID,
+							"attempt":    buildFixAttempts,
+							"error":      logging.TruncateForLog(errText, 300),
+						}).Warn("Pre-completion verifyBuild failed, re-entering loop so AI can fix errors")
+
+						// Keep conversation valid by appending assistant message if non-empty before user fix prompt
+						if strings.TrimSpace(response.Content) != "" {
+							messages = append(messages, models.Message{
+								Role:    "assistant",
+								Content: response.Content,
+							})
+						}
+						messages = append(messages, models.Message{
+							Role: "user",
+							Content: fmt.Sprintf(
+								"⚠️ BUILD VERIFICATION FAILED — live preview cannot load until this error is fixed:\n\n%s\n\nImmediately read/fix the broken file using editFile or createFile (check missing imports, JSX syntax, or invalid component/icon names), then call verifyBuild. NEVER ask the user to run verifyBuild.",
+								errText,
+							),
+						})
+						streamer.SendStatus("fixing", "Fixing build error...")
+						continue
+					}
+				}
+			}
+
+			// No integration or build issues remaining, we're done
 			streamer.SendStatus("completing", "Almost there...")
 			break
 		}
@@ -1414,9 +1470,15 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 // synthesizeBuildSummary produces a comprehensive, elegant markdown summary of what was built
 func (r *Runner) synthesizeBuildSummary(workspacePath string, session *Session, existingContent string) string {
-	// If the AI already provided a rich, descriptive response (>200 chars with markdown structure or bullet points), keep it
+	// If the AI already provided a rich, descriptive response (>200 chars with markdown structure or bullet points)
+	// AND does not leak internal tool instructions like "calling verifyBuild", keep it
 	trimmed := strings.TrimSpace(existingContent)
-	if len(trimmed) > 200 && (strings.Contains(trimmed, "###") || strings.Contains(trimmed, "- ") || strings.Contains(trimmed, "* ")) {
+	lowerTrimmed := strings.ToLower(trimmed)
+	leaksInternalTools := strings.Contains(lowerTrimmed, "verifybuild") ||
+		strings.Contains(lowerTrimmed, "verifyintegration") ||
+		strings.Contains(lowerTrimmed, "createfile") ||
+		strings.Contains(lowerTrimmed, "editfile")
+	if !leaksInternalTools && len(trimmed) > 200 && (strings.Contains(trimmed, "###") || strings.Contains(trimmed, "- ") || strings.Contains(trimmed, "* ")) {
 		return trimmed
 	}
 
