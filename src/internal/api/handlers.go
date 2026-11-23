@@ -689,34 +689,6 @@ func (s *Server) handleBuild(c *gin.Context) {
 	s.runBuildInWorkspace(c, workspacePath)
 }
 
-// isDistUpToDate returns true if dist/index.html exists and is newer than all source files in src/ and root index.html
-func isDistUpToDate(workspacePath string) bool {
-	distIndex := filepath.Join(workspacePath, "dist", "index.html")
-	distInfo, err := os.Stat(distIndex)
-	if err != nil {
-		return false
-	}
-	distTime := distInfo.ModTime()
-
-	if idxInfo, err := os.Stat(filepath.Join(workspacePath, "index.html")); err == nil && idxInfo.ModTime().After(distTime) {
-		return false
-	}
-
-	srcDir := filepath.Join(workspacePath, "src")
-	upToDate := true
-	_ = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		if info.ModTime().After(distTime) {
-			upToDate = false
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return upToDate
-}
-
 // runBuildInWorkspace runs fast Vite build in the given workspace (or reuses fresh dist/ from VerifyBuild)
 func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	// Check if package.json exists
@@ -727,7 +699,7 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	}
 
 	// Fast-path: if VerifyBuild already produced an up-to-date dist/ folder, skip rebuilding (0ms!)
-	if isDistUpToDate(workspacePath) {
+	if executor.IsDistUpToDate(workspacePath) {
 		c.JSON(http.StatusOK, models.BuildResponse{
 			Success: true,
 			Message: "Build completed successfully (cached dist)",
@@ -749,15 +721,19 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 		return
 	}
 
-	// Run direct Vite build (skips slow tsc pass, capped to 192MB heap)
+	// Run direct Vite build (skips slow tsc pass, capped to 256MB heap)
 	bin, prefix := executor.ResolveToolCommand(workspacePath, "vite")
 	cmdArgs := append(prefix, "build", "--logLevel", "error")
 	buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
 	buildCmd.Dir = workspacePath
 	nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
+	sharedNodeModules := "/app/storage/workspaces/.shared_node_modules"
+	localNodeModules := filepath.Join(workspacePath, "node_modules")
 	buildCmd.Env = append(os.Environ(),
-		"NODE_OPTIONS=--max-old-space-size=192",
-		fmt.Sprintf("PATH=%s:%s", nodeBinPath, os.Getenv("PATH")),
+		"NODE_ENV=production",
+		"NODE_OPTIONS=--max-old-space-size=256",
+		fmt.Sprintf("NODE_PATH=%s:%s:%s", localNodeModules, sharedNodeModules, os.Getenv("NODE_PATH")),
+		fmt.Sprintf("PATH=%s:%s:%s", nodeBinPath, filepath.Join(sharedNodeModules, ".bin"), os.Getenv("PATH")),
 	)
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		s.logger.WithField("output", string(output)).WithError(err).Error("vite build failed")
@@ -889,7 +865,7 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 	distIndex := filepath.Join(distPath, "index.html")
 	isEntryRequest := reqPath == "index.html" || !strings.Contains(filepath.Base(reqPath), ".")
 	_, distStatErr := os.Stat(distIndex)
-	needsBuild := os.IsNotExist(distStatErr) || (isEntryRequest && !isDistUpToDate(workspacePath))
+	needsBuild := os.IsNotExist(distStatErr) || (isEntryRequest && !executor.IsDistUpToDate(workspacePath))
 	if needsBuild {
 		pkgJSON := filepath.Join(workspacePath, "package.json")
 		if _, pkgErr := os.Stat(pkgJSON); pkgErr == nil {
@@ -901,7 +877,15 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 				cmdArgs := append(prefix, "build", "--logLevel", "error")
 				buildCmd := exec.CommandContext(bCtx, bin, cmdArgs...)
 				buildCmd.Dir = workspacePath
-				buildCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=192")
+				nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
+				sharedNodeModules := "/app/storage/workspaces/.shared_node_modules"
+				localNodeModules := filepath.Join(workspacePath, "node_modules")
+				buildCmd.Env = append(os.Environ(),
+					"NODE_ENV=production",
+					"NODE_OPTIONS=--max-old-space-size=256",
+					fmt.Sprintf("NODE_PATH=%s:%s:%s", localNodeModules, sharedNodeModules, os.Getenv("NODE_PATH")),
+					fmt.Sprintf("PATH=%s:%s:%s", nodeBinPath, filepath.Join(sharedNodeModules, ".bin"), os.Getenv("PATH")),
+				)
 				if bOut, bErr := buildCmd.CombinedOutput(); bErr != nil {
 					s.logger.WithError(bErr).WithField("output", string(bOut)).Warn("on-the-fly vite build failed in handlePreviewAsset")
 				}

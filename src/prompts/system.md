@@ -793,15 +793,18 @@ YOU ARE NOT DONE UNTIL VERIFYBUILD PASSES. Do not send your final message until 
 - Fixed any errors verifyBuild reported
 - Confirmed the build succeeds
 
-IMPORTANT: Your final message (after all tool calls) should summarize what was CREATED, not what you're ABOUT to create. For example:
-- Good: "I've built your portfolio! It has a hero section, about page, and contact form."
-- Bad: "I'll create a portfolio with a hero section..." (this sounds like you haven't done it yet)
+IMPORTANT: Your final message (after all tool calls) MUST summarize what was CREATED, formatted as a clear Markdown summary:
+### 🎉 What I Built
+- **Pages & Routes**: List all pages created/updated with route paths (`/`, `/about`, etc.).
+- **Key Sections**: Highlight the sections created (Hero, Features, Pricing, Testimonials, FAQ, Contact, Footer, etc.).
+- **Design & Theme**: Mention color palette, typography, and styling configured in `src/custom.css`.
+- **Interactive Components**: Mention buttons, menus, forms, and transitions.
 
 CRITICAL:
 - You MUST use tools to create/modify files. Don't just describe what to do.
 - You MUST run verifyBuild before finishing. If you skip this, the website will be broken.
 - NEVER expose technical jargon to the user. Keep all responses simple and friendly.
-- Always end with a summary of what you BUILT (past tense), not what you WILL build.
+- Always end with a structured summary of what you BUILT (past tense), not what you WILL build.
 
 ## MANDATORY CHECKLIST - Do Not Skip
 Before sending your final message, verify you have done ALL of these:
