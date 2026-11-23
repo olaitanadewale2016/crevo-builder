@@ -163,37 +163,21 @@ func (c *Client) convertMessage(msg models.Message) openai.ChatCompletionMessage
 	return m
 }
 
-// getModelFallbackPool returns an ordered list of models to try if the primary model fails or hits quota
+// getModelFallbackPool returns an ordered list of models to try.
+// If a specific model is set by the admin or user, we strictly use that model without overriding.
 func getModelFallbackPool(currentModel string, baseURL string) []string {
-	isGemini := strings.Contains(baseURL, "googleapis.com") || strings.Contains(currentModel, "gemini")
-	isOpenRouter := strings.Contains(baseURL, "openrouter.ai")
-
-	var pool []string
-	if isGemini {
-		pool = []string{
-			"gemini-2.5-flash-lite",
-			"gemini-2.5-flash",
-		}
-	} else if isOpenRouter {
-		pool = []string{
-			"nvidia/nemotron-3.5-super-vl:free",
-			"google/gemini-2.0-flash-exp:free",
-			"google/gemini-2.0-flash-thinking-exp:free",
-			"openrouter/free",
-			"nvidia/nemotron-3.5-lightning:free",
-			"meta-llama/llama-3.3-70b-instruct:free",
-		}
-	} else {
+	if currentModel != "" {
 		return []string{currentModel}
 	}
 
-	result := []string{currentModel}
-	for _, m := range pool {
-		if m != currentModel {
-			result = append(result, m)
-		}
+	// Only if no model was specified at all do we provide a sensible default:
+	if strings.Contains(baseURL, "googleapis.com") || strings.Contains(baseURL, "gemini") {
+		return []string{"gemini-2.5-flash-lite"}
 	}
-	return result
+	if strings.Contains(baseURL, "openrouter.ai") {
+		return []string{"openrouter/free"}
+	}
+	return []string{"gpt-4o"}
 }
 
 // Chat sends messages and returns response with potential tool calls
