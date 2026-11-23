@@ -47,6 +47,22 @@ func isNodeModulesHealthy(nodeModulesPath string) bool {
 	return false
 }
 
+// GetSharedNodeModulesPath returns the best available shared node_modules cache directory
+func GetSharedNodeModulesPath() string {
+	candidates := []string{
+		"/opt/shared_node_modules",
+		"/app/shared_node_modules",
+		"/app/storage/workspaces/.shared_node_modules",
+		"storage/workspaces/.shared_node_modules",
+	}
+	for _, cand := range candidates {
+		if isNodeModulesHealthy(cand) {
+			return cand
+		}
+	}
+	return "/opt/shared_node_modules"
+}
+
 // EnsureSharedNodeModules copies or symlinks the shared node_modules cache for instant build readiness
 func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	if absWS, err := filepath.Abs(workspacePath); err == nil {
@@ -70,8 +86,10 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	// Clean broken node_modules directory/symlink
 	_ = os.RemoveAll(nodeModulesPath)
 
-	// Locate shared cache across standard paths
+	// Locate shared cache across standard paths (/opt is prioritized because persistent mounts never shadow it)
 	cacheCandidates := []string{
+		"/opt/shared_node_modules",
+		"/app/shared_node_modules",
 		filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules"),
 		"/app/storage/workspaces/.shared_node_modules",
 		"storage/workspaces/.shared_node_modules",
@@ -86,15 +104,7 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	}
 
 	if sharedCacheDir != "" {
-		// 1. Try GNU cp -al hardlinks (~40ms, 0 extra disk space)
-		_ = os.MkdirAll(nodeModulesPath, 0755)
-		cpCmd := exec.CommandContext(ctx, "cp", "-al", sharedCacheDir+"/.", nodeModulesPath)
-		if err := cpCmd.Run(); err == nil && isNodeModulesHealthy(nodeModulesPath) {
-			_ = os.Chmod(filepath.Join(nodeModulesPath, ".bin", "vite"), 0755)
-			return nil
-		}
-
-		// 2. Fallback to instant directory symlink (0ms, 0 disk space, works across filesystems)
+		// 1. Try instant symlink (0ms, 0 disk space, works seamlessly across disk mounts)
 		_ = os.RemoveAll(nodeModulesPath)
 		if symErr := os.Symlink(sharedCacheDir, nodeModulesPath); symErr == nil {
 			if isNodeModulesHealthy(nodeModulesPath) {
@@ -102,9 +112,24 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 			}
 			_ = os.Remove(nodeModulesPath)
 		}
+
+		// 2. Try GNU cp -al hardlinks (~40ms, 0 extra disk space)
+		_ = os.MkdirAll(nodeModulesPath, 0755)
+		cpCmd := exec.CommandContext(ctx, "cp", "-al", sharedCacheDir+"/.", nodeModulesPath)
+		if err := cpCmd.Run(); err == nil && isNodeModulesHealthy(nodeModulesPath) {
+			_ = os.Chmod(filepath.Join(nodeModulesPath, ".bin", "vite"), 0755)
+			return nil
+		}
+
+		// 3. Fallback to copy
+		_ = os.RemoveAll(nodeModulesPath)
+		copyCmd := exec.CommandContext(ctx, "cp", "-r", sharedCacheDir, nodeModulesPath)
+		if err := copyCmd.Run(); err == nil && isNodeModulesHealthy(nodeModulesPath) {
+			return nil
+		}
 	}
 
-	// 3. Cold start fallback: install dependencies once in workspace (capped to 256MB heap)
+	// 4. Cold start fallback: install dependencies once in workspace (capped to 256MB heap)
 	installCmd := exec.CommandContext(ctx, "npm", "install", "--include=dev", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
 	installCmd.Dir = workspacePath
 	installCmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=256")
@@ -125,9 +150,13 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 
 // ResolveToolCommand prefers direct node invocation of local/shared .js, then absolute workspace local .bin, then global PATH binary, then npx fallback.
 func ResolveToolCommand(workspacePath, tool string) (string, []string) {
+	sharedDir := GetSharedNodeModulesPath()
+
 	if tool == "vite" {
 		candidates := []string{
 			filepath.Join(workspacePath, "node_modules", "vite", "bin", "vite.js"),
+			filepath.Join(sharedDir, "vite", "bin", "vite.js"),
+			"/opt/shared_node_modules/vite/bin/vite.js",
 			"/app/storage/workspaces/.shared_node_modules/vite/bin/vite.js",
 			"storage/workspaces/.shared_node_modules/vite/bin/vite.js",
 		}
@@ -141,6 +170,8 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 	if tool == "esbuild" {
 		candidates := []string{
 			filepath.Join(workspacePath, "node_modules", "esbuild", "bin", "esbuild"),
+			filepath.Join(sharedDir, "esbuild", "bin", "esbuild"),
+			"/opt/shared_node_modules/esbuild/bin/esbuild",
 			"/app/storage/workspaces/.shared_node_modules/esbuild/bin/esbuild",
 			"storage/workspaces/.shared_node_modules/esbuild/bin/esbuild",
 		}
@@ -163,9 +194,14 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 		return globalBin, nil
 	}
 
-	sharedBin := filepath.Join("/app/storage/workspaces/.shared_node_modules/.bin", tool)
+	sharedBin := filepath.Join(sharedDir, ".bin", tool)
 	if info, err := os.Stat(sharedBin); err == nil && !info.IsDir() {
 		return sharedBin, nil
+	}
+
+	fallbackBin := filepath.Join("/app/storage/workspaces/.shared_node_modules/.bin", tool)
+	if info, err := os.Stat(fallbackBin); err == nil && !info.IsDir() {
+		return fallbackBin, nil
 	}
 
 	return "npx", []string{tool}
@@ -237,7 +273,7 @@ func (e *BuildExecutor) VerifyBuild(ctx context.Context, args map[string]interfa
 	viteCmd := exec.CommandContext(ctx, bin, cmdArgs...)
 	viteCmd.Dir = e.workspacePath
 	nodeBinPath := filepath.Join(e.workspacePath, "node_modules", ".bin")
-	sharedNodeModules := "/app/storage/workspaces/.shared_node_modules"
+	sharedNodeModules := GetSharedNodeModulesPath()
 	localNodeModules := filepath.Join(e.workspacePath, "node_modules")
 	viteCmd.Env = append(os.Environ(),
 		"NODE_ENV=production",

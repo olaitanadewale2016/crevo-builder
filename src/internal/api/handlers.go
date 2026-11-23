@@ -727,7 +727,7 @@ func (s *Server) runBuildInWorkspace(c *gin.Context, workspacePath string) {
 	buildCmd := exec.CommandContext(c.Request.Context(), bin, cmdArgs...)
 	buildCmd.Dir = workspacePath
 	nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
-	sharedNodeModules := "/app/storage/workspaces/.shared_node_modules"
+	sharedNodeModules := executor.GetSharedNodeModulesPath()
 	localNodeModules := filepath.Join(workspacePath, "node_modules")
 	buildCmd.Env = append(os.Environ(),
 		"NODE_ENV=production",
@@ -878,7 +878,7 @@ func (s *Server) handlePreviewAsset(c *gin.Context) {
 				buildCmd := exec.CommandContext(bCtx, bin, cmdArgs...)
 				buildCmd.Dir = workspacePath
 				nodeBinPath := filepath.Join(workspacePath, "node_modules", ".bin")
-				sharedNodeModules := "/app/storage/workspaces/.shared_node_modules"
+				sharedNodeModules := executor.GetSharedNodeModulesPath()
 				localNodeModules := filepath.Join(workspacePath, "node_modules")
 				buildCmd.Env = append(os.Environ(),
 					"NODE_ENV=production",

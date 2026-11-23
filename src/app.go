@@ -42,6 +42,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Ensure .shared_node_modules is linked from /opt/shared_node_modules if available
+	// This ensures persistent volumes mounted over /app/storage instantly have access to cached node_modules
+	if _, err := os.Stat("/opt/shared_node_modules"); err == nil {
+		targetShared := "./storage/workspaces/.shared_node_modules"
+		if _, err := os.Stat(targetShared); os.IsNotExist(err) {
+			_ = os.Symlink("/opt/shared_node_modules", targetShared)
+		}
+	}
+
 	// Background memory scavenger: regularly return unused virtual memory pages to OS
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

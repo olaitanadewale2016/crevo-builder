@@ -36,12 +36,15 @@ RUN npm install -g typescript esbuild vite
 # Create required runtime directories
 RUN mkdir -p storage/workspaces storage/logs prompts
 
-# Pre-install workspace template dependencies into .shared_node_modules during Docker build
+# Pre-install workspace template dependencies into /opt/shared_node_modules during Docker build
 # This completely eliminates runtime npm installs, cutting build verification from 90s+ to ~2s
+# Stored in /opt so persistent disk mounts at /app/storage never shadow this cache
 COPY template-package.json /tmp/template-cache/package.json
 RUN cd /tmp/template-cache && \
     npm install --include=dev --ignore-scripts --no-audit --no-fund && \
-    mv /tmp/template-cache/node_modules /app/storage/workspaces/.shared_node_modules && \
+    mkdir -p /opt /app/storage/workspaces && \
+    mv /tmp/template-cache/node_modules /opt/shared_node_modules && \
+    ln -sf /opt/shared_node_modules /app/storage/workspaces/.shared_node_modules && \
     rm -rf /tmp/template-cache
 
 # Copy compiled binary from builder stage
