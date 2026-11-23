@@ -632,7 +632,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 					}
 				}
 
-				successMsg := r.synthesizeBuildSummary(session.WorkspacePath, session, "")
+				successMsg := r.synthesizeBuildSummary(session.GetWorkspacePath(), session, "")
 				streamer.SendMessage(successMsg)
 				session.SetStatus(models.StatusCompleted)
 				streamer.SendStatus("completed", "Build complete")
@@ -1130,7 +1130,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 						session.SetBuildResult(bResult.Success, bResult.Content)
 					}
 				}
-				exitMsg = r.synthesizeBuildSummary(session.WorkspacePath, session, "")
+				exitMsg = r.synthesizeBuildSummary(session.GetWorkspacePath(), session, "")
 				session.SetBuildResult(true, "Files updated and saved")
 			}
 			streamer.SendMessage(exitMsg)
@@ -1363,7 +1363,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 
 	// Send the AI's final response as a message with rich build summary
 	if hasChanges {
-		lastAIContent = r.synthesizeBuildSummary(session.WorkspacePath, session, lastAIContent)
+		lastAIContent = r.synthesizeBuildSummary(session.GetWorkspacePath(), session, lastAIContent)
 		streamer.SendMessage(lastAIContent)
 	} else if lastAIContent == "" {
 		lastAIContent = "I've reviewed your request. Please specify which pages or components you'd like to create."

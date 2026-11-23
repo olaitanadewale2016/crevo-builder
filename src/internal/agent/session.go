@@ -291,6 +291,11 @@ func (s *Session) GetWorkspacePath() string {
 	return s.workspacePath
 }
 
+// WorkspacePath returns the workspace path (alias for GetWorkspacePath)
+func (s *Session) WorkspacePath() string {
+	return s.workspacePath
+}
+
 // SetTemplateURL sets the template URL
 func (s *Session) SetTemplateURL(url string) {
 	s.mu.Lock()
