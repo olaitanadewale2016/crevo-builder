@@ -633,7 +633,7 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 				}
 
 				successMsg := "Your website files have been generated and updated successfully! You can preview your site now."
-				streamer.SendMessage(models.MessageRoleAssistant, successMsg)
+				streamer.SendMessage(successMsg)
 				session.SetStatus(models.StatusCompleted)
 				streamer.SendStatus("completed", "Build complete")
 				streamer.SendComplete(models.CompleteData{
