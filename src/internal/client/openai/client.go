@@ -171,6 +171,9 @@ func getModelFallbackPool(currentModel string, baseURL string) []string {
 	if isGemini {
 		pool = []string{
 			"gemini-2.5-flash-lite",
+			"gemini-2.0-flash",
+			"gemini-2.0-flash-lite",
+			"gemini-1.5-flash",
 			"gemini-2.5-flash",
 		}
 	} else if isOpenRouter {
@@ -186,9 +189,22 @@ func getModelFallbackPool(currentModel string, baseURL string) []string {
 		return []string{currentModel}
 	}
 
-	result := []string{currentModel}
+	result := make([]string, 0, len(pool)+1)
+	// If currentModel is gemini-2.5-flash (20 requests/day limit on free tier), prefer high-quota models first
+	if isGemini && currentModel == "gemini-2.5-flash" {
+		result = append(result, "gemini-2.5-flash-lite", "gemini-2.0-flash")
+	} else {
+		result = append(result, currentModel)
+	}
 	for _, m := range pool {
-		if m != currentModel {
+		alreadyPresent := false
+		for _, r := range result {
+			if r == m {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
 			result = append(result, m)
 		}
 	}
@@ -376,8 +392,8 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					break
 				}
 
-				// If this is the last or only model, wait and retry
-				sleepDuration := time.Duration(12*(attempt+1)) * time.Second
+				// If this is the last or only model, wait and retry with short backoff
+				sleepDuration := time.Duration(2*(attempt+1)) * time.Second
 				if c.logger != nil {
 					c.logger.Warnf("Model %s rate limited. Waiting %v before attempt %d", candidateModel, sleepDuration, attempt+2)
 				}
