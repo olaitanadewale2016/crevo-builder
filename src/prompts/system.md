@@ -12,9 +12,10 @@ Build cohesive, agency-grade websites that look thoughtfully crafted — never r
    - **NEVER deliver a website leaving `"Welcome to Your Website"` on `/` (`src/pages/Home.tsx`)**! You MUST replace `src/pages/Home.tsx` (or update the `/` route in `src/routes.tsx`) with the complete custom website requested by the user.
    - **NEVER nest `<BrowserRouter>` or `<Router>`** inside `Home.tsx`, `Layout.tsx`, `App.tsx`, or any component (`src/main.tsx` already wraps `<App />` in `<BrowserRouter>`).
    - **ALWAYS use NAMED imports for shadcn/ui components** (e.g. `import { Button } from '../components/ui/button'`, `import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'`), NEVER default imports!
-   - **Tailwind v4 CSS Rules (`src/custom.css` vs `src/index.css`)**:
-     - `src/index.css` ALREADY defines Tailwind v4 (`@import "tailwindcss";`) and `@theme inline` tokens. NEVER modify `src/index.css` directly!
-     - Put brand CSS variables (`:root { --primary: ...; }`, `.dark { ... }`), Google Fonts `@import`, and custom styling in `src/custom.css`. If you use `@apply` (e.g. `@apply border-border`), put `@reference "./index.css";` on line 1 of `src/custom.css` (or use standard CSS properties).
+   - **Tailwind v4 CSS Rules & Color Tokens (`src/custom.css` vs `src/index.css`)**:
+     - `src/index.css` ALREADY defines Tailwind v4 (`@import "tailwindcss";`) and maps colors via `@theme inline { --color-primary: hsl(var(--primary)); ... }`. NEVER modify `src/index.css` or `index.html` directly!
+     - **CRITICAL HSL TRIPLET FORMAT**: In `src/custom.css`, ALWAYS write **raw HSL triplets** (`H S% L%`) inside `:root` and `.dark` (e.g., `--primary: 239 84% 58%; --background: 220 25% 98%; --muted: 220 20% 94%; --muted-foreground: 220 12% 44%;`) — **NEVER** write `#hex`, `rgb(...)`, or `hsl(...)` inside shadcn color variables!
+     - **Intentional Google Font Pairing**: Load domain-matched Google Fonts on line 1 via `@import url('https://fonts.googleapis.com/css2?...')` and set `--font-display` and `--font-sans` in `:root` (e.g. `'Playfair Display'` + `'Plus Jakarta Sans'` for luxury/hospitality, `'Outfit'`/`'Space Grotesk'` + `'Inter'` for SaaS/tech, `'DM Serif Display'` + `'DM Sans'` for editorial/agency). If you use `@apply` in `src/custom.css`, keep `@reference "./index.css";` at the top (after `@import`).
    - **Verify ONCE at the end**: If using `generateAEO`, call it BEFORE `verifyBuild` so crawler assets & JSON-LD compile into the single `verifyBuild` pass. Run `verifyBuild` ONCE after all edits (plus `verifyIntegration` if adding new routes). Fix any reported build error immediately and re-run `verifyBuild` before summarizing.
 
 ## Your Role & Communication

@@ -110,6 +110,15 @@ func (e *FileExecutor) CreateFile(ctx context.Context, args map[string]interface
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
+	// Sanitize src/custom.css (hoist Google Fonts into index.html & convert hex/rgb/hsl color tokens to raw HSL triplets)
+	if isCustomCSSPath(path) {
+		var cssFixes int
+		content, cssFixes = sanitizeCustomCSS(content, e.workspacePath)
+		if cssFixes > 0 {
+			e.debug("CreateFile sanitized custom.css", "fixes", cssFixes)
+		}
+	}
+
 	// Normalize CSS files for Tailwind v4 compatibility (injects missing @reference or strips circular ones)
 	if strings.HasSuffix(strings.ToLower(path), ".css") {
 		content = NormalizeCSSContent(content, fullPath, e.workspacePath)
@@ -332,6 +341,15 @@ func (e *FileExecutor) EditFile(ctx context.Context, args map[string]interface{}
 				Success: false,
 				Content: fmt.Sprintf("Edit would introduce syntax errors:\n%s\n\nOriginal file unchanged.", err.Error()),
 			}, nil
+		}
+	}
+
+	// Sanitize src/custom.css (hoist Google Fonts into index.html & normalize HSL color tokens) before saving
+	if isCustomCSSPath(path) {
+		var cssFixes int
+		newContent, cssFixes = sanitizeCustomCSS(newContent, e.workspacePath)
+		if cssFixes > 0 {
+			e.debug("EditFile sanitized custom.css", "fixes", cssFixes)
 		}
 	}
 

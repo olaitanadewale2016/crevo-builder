@@ -247,7 +247,15 @@ func buildThemePresetCompactSection(preset *models.ThemePreset) string {
 	if preset == nil || preset.ID == "" || strings.EqualFold(preset.ID, "default") {
 		return ""
 	}
-	return fmt.Sprintf("\n## THEME: %s — Use specified colors and fonts.\n", preset.Name)
+	desc := preset.Description
+	if desc == "" {
+		desc = "curated color system"
+	}
+	primary := ""
+	if preset.Light != nil && preset.Light["primary"] != "" {
+		primary = fmt.Sprintf(" (primary HSL: `%s`)", preset.Light["primary"])
+	}
+	return fmt.Sprintf("\n## THEME PRESET ACTIVE: %s (%s)%s\nThis theme is ALREADY applied to `src/index.css`. Keep its palette harmony by using semantic classes (`bg-primary`, `text-primary-foreground`, `bg-card`, `bg-muted`, `text-muted-foreground`, `border-border`). In `src/custom.css`, focus on typography (`--font-display`, `--font-sans` + Google Fonts) without overriding the user's chosen theme colors unless explicitly asked.\n", preset.Name, desc, primary)
 }
 
 func buildFileTreeSection(workspacePath string) string {

@@ -645,6 +645,10 @@ func (s *Server) handleApplyTheme(c *gin.Context) {
 		return
 	}
 
+	// Remove conflicting shadcn color variable overrides from src/custom.css so the explicitly
+	// selected Theme Designer preset takes visible effect (preserving fonts & custom rules).
+	executor.StripThemeColorOverridesFromCustomCSS(workspacePath)
+
 	_, _ = revMgr.CreateSnapshotIfChanged("Theme update")
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
