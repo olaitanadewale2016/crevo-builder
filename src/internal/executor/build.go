@@ -38,11 +38,20 @@ func NewBuildExecutor(workspacePath string, toolConfig models.ToolExecutionConfi
 }
 
 // isNodeModulesHealthy checks that node_modules contains all essential build & runtime packages
+// AND that its resolved real directory basename is literally "node_modules" (required by Node.js ESM resolution).
 func isNodeModulesHealthy(nodeModulesPath string) bool {
+	resolvedPath, err := filepath.EvalSymlinks(nodeModulesPath)
+	if err != nil {
+		return false
+	}
+	if filepath.Base(resolvedPath) != "node_modules" {
+		return false
+	}
 	required := []string{
-		filepath.Join(nodeModulesPath, "vite", "bin", "vite.js"),
-		filepath.Join(nodeModulesPath, "react", "package.json"),
-		filepath.Join(nodeModulesPath, "@tailwindcss", "vite", "package.json"),
+		filepath.Join(resolvedPath, "vite", "bin", "vite.js"),
+		filepath.Join(resolvedPath, "picomatch", "package.json"),
+		filepath.Join(resolvedPath, "react", "package.json"),
+		filepath.Join(resolvedPath, "@tailwindcss", "vite", "package.json"),
 	}
 	for _, p := range required {
 		if _, err := os.Stat(p); err != nil {
@@ -52,20 +61,21 @@ func isNodeModulesHealthy(nodeModulesPath string) bool {
 	return true
 }
 
-// GetSharedNodeModulesPath returns the best available shared node_modules cache directory
+// GetSharedNodeModulesPath returns the best available shared node_modules cache directory.
+// CRITICAL: Every candidate's basename MUST be "node_modules" so Node.js ESM resolution works across symlinks.
 func GetSharedNodeModulesPath() string {
 	candidates := []string{
-		"/opt/shared_node_modules",
-		"/app/shared_node_modules",
-		"/app/storage/workspaces/.shared_node_modules",
-		"storage/workspaces/.shared_node_modules",
+		"/opt/template-cache/node_modules",
+		"/app/template-cache/node_modules",
+		"/app/storage/workspaces/.shared_cache/node_modules",
+		"storage/workspaces/.shared_cache/node_modules",
 	}
 	for _, cand := range candidates {
 		if isNodeModulesHealthy(cand) {
 			return cand
 		}
 	}
-	return "/opt/shared_node_modules"
+	return "/opt/template-cache/node_modules"
 }
 
 // EnsureSharedNodeModules copies or symlinks the shared node_modules cache for instant build readiness
@@ -75,7 +85,7 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	}
 	nodeModulesPath := filepath.Join(workspacePath, "node_modules")
 
-	// If node_modules is already healthy (either directory or symlink), return immediately (0ms)
+	// If node_modules is already healthy (either directory or symlink to a real "node_modules" dir), return immediately (0ms)
 	if isNodeModulesHealthy(nodeModulesPath) {
 		return nil
 	}
@@ -88,16 +98,16 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 		return nil
 	}
 
-	// Clean broken node_modules directory/symlink
+	// Clean broken or legacy-symlinked node_modules directory
 	_ = os.RemoveAll(nodeModulesPath)
 
 	// Locate shared cache across standard paths (/opt is prioritized because persistent mounts never shadow it)
 	cacheCandidates := []string{
-		"/opt/shared_node_modules",
-		"/app/shared_node_modules",
-		filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules"),
-		"/app/storage/workspaces/.shared_node_modules",
-		"storage/workspaces/.shared_node_modules",
+		"/opt/template-cache/node_modules",
+		"/app/template-cache/node_modules",
+		filepath.Join(filepath.Dir(workspacePath), ".shared_cache", "node_modules"),
+		"/app/storage/workspaces/.shared_cache/node_modules",
+		"storage/workspaces/.shared_cache/node_modules",
 	}
 
 	var sharedCacheDir string
@@ -143,8 +153,9 @@ func EnsureSharedNodeModules(ctx context.Context, workspacePath string) error {
 	}
 	defer debug.FreeOSMemory()
 
-	// Populate shared cache via hardlink copy while keeping workspace node_modules intact
-	primarySharedDir := filepath.Join(filepath.Dir(workspacePath), ".shared_node_modules")
+	// Populate shared cache via hardlink copy while keeping workspace node_modules intact.
+	// Directory basename MUST literally be "node_modules" for Node.js ESM resolution.
+	primarySharedDir := filepath.Join(filepath.Dir(workspacePath), ".shared_cache", "node_modules")
 	if !isNodeModulesHealthy(primarySharedDir) {
 		_ = os.RemoveAll(primarySharedDir)
 		_ = os.MkdirAll(primarySharedDir, 0755)
@@ -161,9 +172,9 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 		candidates := []string{
 			filepath.Join(workspacePath, "node_modules", "vite", "bin", "vite.js"),
 			filepath.Join(sharedDir, "vite", "bin", "vite.js"),
-			"/opt/shared_node_modules/vite/bin/vite.js",
-			"/app/storage/workspaces/.shared_node_modules/vite/bin/vite.js",
-			"storage/workspaces/.shared_node_modules/vite/bin/vite.js",
+			"/opt/template-cache/node_modules/vite/bin/vite.js",
+			"/app/storage/workspaces/.shared_cache/node_modules/vite/bin/vite.js",
+			"storage/workspaces/.shared_cache/node_modules/vite/bin/vite.js",
 		}
 		for _, cand := range candidates {
 			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
@@ -179,9 +190,9 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 		candidates := []string{
 			filepath.Join(workspacePath, "node_modules", "esbuild", "bin", "esbuild"),
 			filepath.Join(sharedDir, "esbuild", "bin", "esbuild"),
-			"/opt/shared_node_modules/esbuild/bin/esbuild",
-			"/app/storage/workspaces/.shared_node_modules/esbuild/bin/esbuild",
-			"storage/workspaces/.shared_node_modules/esbuild/bin/esbuild",
+			"/opt/template-cache/node_modules/esbuild/bin/esbuild",
+			"/app/storage/workspaces/.shared_cache/node_modules/esbuild/bin/esbuild",
+			"storage/workspaces/.shared_cache/node_modules/esbuild/bin/esbuild",
 		}
 		for _, cand := range candidates {
 			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
@@ -207,7 +218,7 @@ func ResolveToolCommand(workspacePath, tool string) (string, []string) {
 		return sharedBin, nil
 	}
 
-	fallbackBin := filepath.Join("/app/storage/workspaces/.shared_node_modules/.bin", tool)
+	fallbackBin := filepath.Join("/opt/template-cache/node_modules/.bin", tool)
 	if info, err := os.Stat(fallbackBin); err == nil && !info.IsDir() {
 		return fallbackBin, nil
 	}
