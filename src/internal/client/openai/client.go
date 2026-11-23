@@ -333,6 +333,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 
 	var finalResp chatResponse
 	var lastErr error
+	var primaryDailyQuotaErr error
 	success := false
 
 	for modelIdx, candidateModel := range modelsToTry {
@@ -574,12 +575,15 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 
 				// Only fail over to another model if it is an actual 24h daily quota exhaustion
 				if isTrueDailyLimit {
+					quotaErr := fmt.Errorf("HTTP 429: Daily quota exhausted for %s (free-tier limit reached). Wait for reset, enable billing, or switch AI provider/model in Admin → AI Providers", candidateModel)
+					if primaryDailyQuotaErr == nil {
+						primaryDailyQuotaErr = quotaErr
+					}
+					lastErr = quotaErr
 					if modelIdx < len(modelsToTry)-1 {
 						if c.logger != nil {
 							c.logger.Warnf("Model %s exhausted daily quota, failing over to next model: %s", candidateModel, modelsToTry[modelIdx+1])
 						}
-					} else {
-						lastErr = fmt.Errorf("Gemini free-tier daily quota exhausted for %s (20 req/day limit reached on Google AI Studio). Wait for daily reset, enable billing on Google AI Studio, or switch AI provider/model in Admin → AI Providers", candidateModel)
 					}
 					break
 				}
@@ -635,6 +639,11 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 	duration := time.Since(startTime)
 
 	if !success {
+		// If the primary model hit a 24h daily quota limit and fallback sibling models returned 404/etc.,
+		// return the original daily quota error so the user sees the real root cause.
+		if primaryDailyQuotaErr != nil {
+			lastErr = primaryDailyQuotaErr
+		}
 		if c.logger != nil {
 			c.logger.WithFields(logrus.Fields{
 				"model":    c.model,
