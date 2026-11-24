@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"crevo-builder/internal/models"
@@ -29,6 +30,15 @@ type Client struct {
 	logger          *logrus.Logger
 	retryConfig     models.RetryConfig
 	onRetry         models.RetryCallback
+
+	// Session-cached parameter negotiation flags (avoid re-probing rejected params every turn)
+	negMu                       sync.Mutex
+	minimalReasoningUnsupported bool
+	reasoningStripped           bool
+	tokenFieldSwapped           bool
+	tokenCapStripped            bool
+	extraContentStripped        bool
+	resolvedEndpoint            string
 }
 
 // Ensure Client implements AIProvider
@@ -276,6 +286,16 @@ func parseToolCallArguments(raw string) (map[string]interface{}, error) {
 
 // Chat sends messages and returns response with potential tool calls
 func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []models.ToolDefinition) (*models.Response, error) {
+	// Snapshot session-cached negotiation state so rejected parameters are never re-sent
+	c.negMu.Lock()
+	cachedMinimalUnsupported := c.minimalReasoningUnsupported
+	cachedReasoningStripped := c.reasoningStripped
+	cachedTokenFieldSwapped := c.tokenFieldSwapped
+	cachedTokenCapStripped := c.tokenCapStripped
+	cachedExtraContentStripped := c.extraContentStripped
+	cachedResolvedEndpoint := c.resolvedEndpoint
+	c.negMu.Unlock()
+
 	isGeminiEndpoint := strings.Contains(strings.ToLower(c.baseURL), "googleapis.com") ||
 		strings.Contains(strings.ToLower(c.model), "gemini")
 
@@ -296,7 +316,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			for i, tc := range msg.ToolCalls {
 				argsBytes, _ := json.Marshal(tc.Arguments)
 				var extra map[string]interface{}
-				if isGeminiEndpoint && len(tc.ExtraContent) > 0 {
+				if isGeminiEndpoint && !cachedExtraContentStripped && len(tc.ExtraContent) > 0 {
 					extra = tc.ExtraContent
 				}
 				cm.ToolCalls[i] = chatToolCall{
@@ -327,6 +347,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 
 	modelsToTry := getModelFallbackPool(c.model, c.baseURL)
 	endpoint := resolveChatEndpoint(c.baseURL)
+	if cachedResolvedEndpoint != "" {
+		endpoint = cachedResolvedEndpoint
+	}
 	v1Fallback := buildV1FallbackEndpoint(c.baseURL)
 
 	startTime := time.Now()
@@ -342,22 +365,43 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			Messages: chatMessages,
 			Tools:    chatTools,
 		}
-		if requiresMaxCompletionTokens(candidateModel, c.baseURL) {
-			reqPayload.MaxCompletionTokens = c.maxTokens
-		} else if c.maxTokens > 0 {
-			reqPayload.MaxTokens = c.maxTokens
-		}
-		modelLower := strings.ToLower(candidateModel)
-		isGeminiThinking := strings.Contains(modelLower, "gemini-2.5") || strings.Contains(modelLower, "gemini-3")
-		if isGeminiThinking {
-			// Cap Gemini thinking models at "low" unless the user explicitly requested "high" reasoning
-			if strings.EqualFold(c.reasoningEffort, "high") {
-				reqPayload.ReasoningEffort = "high"
-			} else {
-				reqPayload.ReasoningEffort = "low"
+		if !cachedTokenCapStripped && c.maxTokens > 0 {
+			useMaxCompletion := requiresMaxCompletionTokens(candidateModel, c.baseURL)
+			if cachedTokenFieldSwapped {
+				useMaxCompletion = !useMaxCompletion
 			}
-		} else if c.reasoningEffort != "" && supportsReasoningEffort(candidateModel) {
-			reqPayload.ReasoningEffort = strings.ToLower(c.reasoningEffort)
+			if useMaxCompletion {
+				reqPayload.MaxCompletionTokens = c.maxTokens
+			} else {
+				reqPayload.MaxTokens = c.maxTokens
+			}
+		}
+
+		if !cachedReasoningStripped {
+			effortLower := strings.ToLower(strings.TrimSpace(c.reasoningEffort))
+			if isGeminiOrThinkingModel(candidateModel) {
+				// Prevent thinking models (gemini-2.5/3/4, gemma-4, thinking, hydrogen) from burning
+				// 20-50s of hidden reasoning tokens on routine/medium turns.
+				switch effortLower {
+				case "high":
+					reqPayload.ReasoningEffort = "high"
+				case "low":
+					if cachedMinimalUnsupported {
+						reqPayload.ReasoningEffort = "low"
+					} else {
+						reqPayload.ReasoningEffort = "minimal"
+					}
+				default: // "medium" or ""
+					reqPayload.ReasoningEffort = "low"
+				}
+			} else if supportsReasoningEffort(candidateModel) {
+				// OpenAI/DeepSeek/xAI reasoning models: keep "low" on routine/follow-up turns unless "high" is explicitly requested
+				if effortLower == "high" {
+					reqPayload.ReasoningEffort = "high"
+				} else {
+					reqPayload.ReasoningEffort = "low"
+				}
+			}
 		}
 
 		reqBodyBytes, err := json.Marshal(reqPayload)
@@ -375,11 +419,12 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		}
 
 		maxAttempts := 6
-		reasoningStripped := false
-		tokenFieldSwapped := false
-		tokenCapStripped := false
-		extraContentStripped := false
-		v1Retried := false
+		minimalUnsupported := cachedMinimalUnsupported
+		reasoningStripped := cachedReasoningStripped
+		tokenFieldSwapped := cachedTokenFieldSwapped
+		tokenCapStripped := cachedTokenCapStripped
+		extraContentStripped := cachedExtraContentStripped
+		v1Retried := v1Fallback != "" && endpoint == v1Fallback
 		activeEndpoint := endpoint
 
 		for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -426,6 +471,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					if !v1Retried && v1Fallback != "" {
 						v1Retried = true
 						activeEndpoint = v1Fallback
+						c.negMu.Lock()
+						c.resolvedEndpoint = activeEndpoint
+						c.negMu.Unlock()
 						continue
 					}
 					break
@@ -450,6 +498,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 
 				finalResp = cr
 				success = true
+				c.negMu.Lock()
+				c.resolvedEndpoint = activeEndpoint
+				c.negMu.Unlock()
 				if candidateModel != c.model {
 					if c.logger != nil {
 						c.logger.WithFields(logrus.Fields{
@@ -501,6 +552,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			if httpResp.StatusCode == 404 && !v1Retried && v1Fallback != "" {
 				v1Retried = true
 				activeEndpoint = v1Fallback
+				c.negMu.Lock()
+				c.resolvedEndpoint = activeEndpoint
+				c.negMu.Unlock()
 				if c.logger != nil {
 					c.logger.Warnf("Endpoint %s returned 404, retrying with %s", endpoint, activeEndpoint)
 				}
@@ -511,11 +565,25 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			if httpResp.StatusCode == 400 || httpResp.StatusCode == 422 {
 				mutated := false
 
-				// 1. Strip reasoning_effort if rejected
-				if reqPayload.ReasoningEffort != "" && !reasoningStripped {
+				// 1a. Downgrade reasoning_effort "minimal" -> "low" if upstream rejects "minimal"
+				if reqPayload.ReasoningEffort == "minimal" && !minimalUnsupported {
+					minimalUnsupported = true
+					reqPayload.ReasoningEffort = "low"
+					mutated = true
+					c.negMu.Lock()
+					c.minimalReasoningUnsupported = true
+					c.negMu.Unlock()
+					if c.logger != nil {
+						c.logger.Warnf("Model %s rejected reasoning_effort=minimal (%d), retrying with low", candidateModel, httpResp.StatusCode)
+					}
+				} else if reqPayload.ReasoningEffort != "" && !reasoningStripped {
+					// 1b. Strip reasoning_effort completely if still rejected
 					reasoningStripped = true
 					reqPayload.ReasoningEffort = ""
 					mutated = true
+					c.negMu.Lock()
+					c.reasoningStripped = true
+					c.negMu.Unlock()
 					if c.logger != nil {
 						c.logger.Warnf("Model %s rejected reasoning_effort (%d), retrying without it", candidateModel, httpResp.StatusCode)
 					}
@@ -525,6 +593,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					reqPayload.MaxCompletionTokens = reqPayload.MaxTokens
 					reqPayload.MaxTokens = 0
 					mutated = true
+					c.negMu.Lock()
+					c.tokenFieldSwapped = true
+					c.negMu.Unlock()
 					if c.logger != nil {
 						c.logger.Warnf("Model %s requires max_completion_tokens, switching from max_tokens", candidateModel)
 					}
@@ -535,6 +606,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					reqPayload.MaxTokens = reqPayload.MaxCompletionTokens
 					reqPayload.MaxCompletionTokens = 0
 					mutated = true
+					c.negMu.Lock()
+					c.tokenFieldSwapped = true
+					c.negMu.Unlock()
 					if c.logger != nil {
 						c.logger.Warnf("Model %s rejected max_completion_tokens, switching to max_tokens", candidateModel)
 					}
@@ -545,6 +619,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					reqPayload.MaxTokens = 0
 					reqPayload.MaxCompletionTokens = 0
 					mutated = true
+					c.negMu.Lock()
+					c.tokenCapStripped = true
+					c.negMu.Unlock()
 					if c.logger != nil {
 						c.logger.Warnf("Model %s rejected max_tokens value (%d), retrying without explicit token cap", candidateModel, c.maxTokens)
 					}
@@ -557,6 +634,9 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 						}
 					}
 					mutated = true
+					c.negMu.Lock()
+					c.extraContentStripped = true
+					c.negMu.Unlock()
 				}
 
 				if mutated {
@@ -594,15 +674,15 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 					break
 				}
 
-				// Cap 429 retry attempts to 3 retries (4 total attempts, ~45s max) so builds never stall for 160s+
+				// Cap 429 retry attempts to 3 retries (4 total attempts)
 				if attempt >= 3 {
 					break
 				}
 
-				// Extract retry delay from header, JSON details (e.g. Google's retryDelay), or adaptive backoff
+				// Extract retry delay from header, JSON details (e.g. Google's retryDelay), or fast adaptive backoff
 				sleepDuration := extractRetryDelay(httpResp.Header.Get("Retry-After"), bodyBytes, attempt)
-				if sleepDuration > 18*time.Second {
-					sleepDuration = 18 * time.Second
+				if sleepDuration > 10*time.Second {
+					sleepDuration = 10 * time.Second
 				}
 
 				if c.logger != nil {
@@ -727,19 +807,34 @@ func BuildAssistantMessageWithToolCalls(content string, toolCalls []models.ToolC
 	}
 }
 
+// isGeminiOrThinkingModel returns true for Gemini/Gemma/thinking models that spend
+// heavy hidden reasoning tokens unless explicitly capped via reasoning_effort.
+func isGeminiOrThinkingModel(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "gemini-2.5") ||
+		strings.Contains(m, "gemini-3") ||
+		strings.Contains(m, "gemini-4") ||
+		strings.Contains(m, "gemma-4") ||
+		strings.Contains(m, "thinking") ||
+		strings.Contains(m, "hydrogen")
+}
+
 // supportsReasoningEffort returns true for models that accept the reasoning_effort field
 func supportsReasoningEffort(model string) bool {
 	m := strings.ToLower(model)
-	return strings.HasPrefix(m, "o1") ||
+	if strings.Contains(m, "non-reasoning") {
+		return false
+	}
+	return isGeminiOrThinkingModel(m) ||
+		strings.HasPrefix(m, "o1") ||
 		strings.HasPrefix(m, "o3") ||
 		strings.HasPrefix(m, "o4") ||
 		strings.HasPrefix(m, "gpt-5") ||
-		strings.Contains(m, "reasoning") ||
-		strings.Contains(m, "thinking") ||
-		strings.Contains(m, "reasoner") ||
+		strings.Contains(m, "deepseek-reasoner") ||
+		strings.Contains(m, "grok-4") ||
 		strings.Contains(m, "grok-3-mini") ||
-		strings.Contains(m, "gemini-2.5") ||
-		strings.Contains(m, "gemini-3")
+		strings.Contains(m, "reasoning") ||
+		strings.Contains(m, "reasoner")
 }
 
 // ConvertToolCallsToOpenAI converts our ToolCall to openai.ToolCall
@@ -811,10 +906,10 @@ func extractRetryDelay(headerVal string, bodyBytes []byte, attempt int) time.Dur
 		}
 	}
 
-	// 4. Default adaptive backoff capped to avoid multi-minute silent hangs
-	backoffs := []int{6, 12, 20, 30, 40}
+	// 4. Default fast adaptive backoff capped at 10s to keep builds responsive
+	backoffs := []int{2, 4, 8, 10}
 	if attempt < len(backoffs) {
 		return time.Duration(backoffs[attempt]) * time.Second
 	}
-	return 40 * time.Second
+	return 10 * time.Second
 }

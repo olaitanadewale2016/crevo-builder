@@ -37,6 +37,8 @@ type Server struct {
 	mu               sync.RWMutex
 	revisionManagers map[string]*revision.Manager
 	revisionMu       sync.RWMutex
+	pusherValidMu    sync.RWMutex
+	pusherValidCache map[string]time.Time // cache validated Pusher credential keys -> expiry
 	serverKey        string
 	workspacePath    string
 	router           *gin.Engine
@@ -57,6 +59,7 @@ func NewServer(cfg ServerConfig, logger *logrus.Logger) *Server {
 	s := &Server{
 		sessions:         make(map[string]*agent.Session),
 		revisionManagers: make(map[string]*revision.Manager),
+		pusherValidCache: make(map[string]time.Time),
 		serverKey:        cfg.ServerKey,
 		workspacePath:    workspacePath,
 		version:          cfg.Version,
@@ -207,7 +210,7 @@ func (s *Server) handleRun(c *gin.Context) {
 			if err != nil {
 				s.logger.Warnf("Invalid Pusher config for session %s: %v, falling back to webhook-only", sessionID, err)
 				session = agent.NewSession(sessionID, req.WorkspaceID, workspacePath, req.WebhookURL, s.serverKey, &req.Config)
-			} else if err := pusherClient.ValidateCredentials(); err != nil {
+			} else if err := s.validatePusherCredentialsCached(pusherConfig, pusherClient); err != nil {
 				s.logger.Warnf("Pusher validation failed for session %s: %v, falling back to webhook-only", sessionID, err)
 				session = agent.NewSession(sessionID, req.WorkspaceID, workspacePath, req.WebhookURL, s.serverKey, &req.Config)
 			} else {
@@ -776,8 +779,44 @@ func (s *Server) handleBuildOutput(c *gin.Context) {
 	s.serveBuildOutput(c, workspacePath, workspaceID)
 }
 
-// serveBuildOutput creates and serves a zip of the dist folder
+// serveBuildOutput creates and serves a zip of the dist folder.
+// Supports optional ?ensure_build=1 to compile inline when dist is missing or stale.
 func (s *Server) serveBuildOutput(c *gin.Context, workspacePath, workspaceID string) {
+	ensureBuild := c.Query("ensure_build") == "1" || strings.EqualFold(c.Query("ensure_build"), "true")
+	if ensureBuild && !executor.IsDistUpToDate(workspacePath) {
+		packageJSON := filepath.Join(workspacePath, "package.json")
+		if _, err := os.Stat(packageJSON); os.IsNotExist(err) {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "No package.json found in workspace"})
+			return
+		}
+
+		executor.BuildMu.Lock()
+		func() {
+			defer executor.BuildMu.Unlock()
+			defer debug.FreeOSMemory()
+			if executor.IsDistUpToDate(workspacePath) {
+				return
+			}
+			if err := executor.EnsureSharedNodeModules(c.Request.Context(), workspacePath); err != nil {
+				s.logger.WithError(err).Error("Failed to prepare node_modules in serveBuildOutput")
+				c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+					Error: fmt.Sprintf("npm install failed: %s", err.Error()),
+				})
+				return
+			}
+			if output, err := executor.RunViteBuild(c.Request.Context(), workspacePath); err != nil {
+				s.logger.WithField("output", output).WithError(err).Error("vite build failed in serveBuildOutput")
+				c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+					Error: fmt.Sprintf("vite build failed (%v): %s", err, output),
+				})
+				return
+			}
+		}()
+		if c.Writer.Written() {
+			return
+		}
+	}
+
 	distPath := filepath.Join(workspacePath, "dist")
 	if _, err := os.Stat(distPath); os.IsNotExist(err) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Build output not found"})
@@ -797,7 +836,13 @@ func (s *Server) serveBuildOutput(c *gin.Context, workspacePath, workspaceID str
 			return err
 		}
 
+		// Skip internal build stamp file
+		if info.Name() == ".build_stamp" {
+			return nil
+		}
+
 		relPath, _ := filepath.Rel(distPath, path)
+		slashRel := filepath.ToSlash(relPath)
 
 		// Read file content
 		data, err := os.ReadFile(path)
@@ -807,11 +852,23 @@ func (s *Server) serveBuildOutput(c *gin.Context, workspacePath, workspaceID str
 
 		// Inject base tag into index.html to fix relative asset paths
 		// This ensures ./assets/* resolves to /preview/{id}/assets/* instead of /preview/assets/*
-		if relPath == "index.html" {
+		if slashRel == "index.html" {
 			data = injectBaseTag(data, projectID)
 		}
 
-		w, err := zipWriter.Create(relPath)
+		// Use zip.Store (no wasted CPU re-compression) for already-minified/compressed assets
+		method := zip.Deflate
+		switch strings.ToLower(filepath.Ext(slashRel)) {
+		case ".js", ".css", ".png", ".jpg", ".jpeg", ".webp", ".woff2", ".gif":
+			method = zip.Store
+		}
+
+		header := &zip.FileHeader{
+			Name:     slashRel,
+			Method:   method,
+			Modified: info.ModTime(),
+		}
+		w, err := zipWriter.CreateHeader(header)
 		if err != nil {
 			return err
 		}
@@ -1115,8 +1172,60 @@ func workspaceHasFiles(workspacePath string) bool {
 	return false
 }
 
-// initializeWorkspaceFromTemplate fetches template ZIP from Laravel API and extracts it to workspace
+var safeTemplateCacheIDRe = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+func sanitizeTemplateCacheID(templateID string) string {
+	cleaned := safeTemplateCacheIDRe.ReplaceAllString(strings.TrimSpace(templateID), "_")
+	cleaned = strings.Trim(cleaned, "_-")
+	if cleaned == "" {
+		return "default"
+	}
+	return cleaned
+}
+
+// validatePusherCredentialsCached caches successful Pusher credential validations per
+// (appID, key, cluster, host) for 10 minutes so /api/run never blocks 200-800ms on repeat runs.
+func (s *Server) validatePusherCredentialsCached(cfg *pusher.Config, client *pusher.PusherClient) error {
+	cacheKey := fmt.Sprintf("%s|%s|%s|%s|%s", cfg.AppID, cfg.Key, cfg.Cluster, cfg.Host, cfg.Scheme)
+
+	s.pusherValidMu.RLock()
+	expiry, ok := s.pusherValidCache[cacheKey]
+	s.pusherValidMu.RUnlock()
+	if ok && time.Now().Before(expiry) {
+		return nil
+	}
+
+	if err := client.ValidateCredentials(); err != nil {
+		return err
+	}
+
+	s.pusherValidMu.Lock()
+	s.pusherValidCache[cacheKey] = time.Now().Add(10 * time.Minute)
+	s.pusherValidMu.Unlock()
+	return nil
+}
+
+// initializeWorkspaceFromTemplate extracts template ZIP to workspace, using a local disk cache
+// under ./storage/template-cache/{templateID}.zip so repeat projects extract in <15ms without HTTP download.
 func (s *Server) initializeWorkspaceFromTemplate(workspacePath, templateID, laravelURL string) error {
+	cacheDir := "./storage/template-cache"
+	safeID := sanitizeTemplateCacheID(templateID)
+	cachePath := filepath.Join(cacheDir, safeID+".zip")
+
+	// Fast path: extract directly from local disk cache if present and valid
+	if info, err := os.Stat(cachePath); err == nil && !info.IsDir() && info.Size() > 0 {
+		if extractErr := unzip.Extract(cachePath, workspacePath); extractErr == nil {
+			s.logger.WithFields(logrus.Fields{
+				"template_id":    templateID,
+				"workspace_path": workspacePath,
+				"cache_path":     cachePath,
+			}).Info("Workspace initialized from cached template")
+			return nil
+		}
+		// Cached zip was unreadable/corrupt — remove and re-download
+		_ = os.Remove(cachePath)
+	}
+
 	// Build download URL
 	downloadURL := fmt.Sprintf("%s/api/templates/%s/download", laravelURL, templateID)
 	s.logger.WithField("download_url", downloadURL).Debug("Fetching template from Laravel")
@@ -1146,24 +1255,35 @@ func (s *Server) initializeWorkspaceFromTemplate(workspacePath, templateID, lara
 		return fmt.Errorf("template API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Create temporary file for ZIP
-	tmpFile, err := os.CreateTemp("", "template-*.zip")
+	// Ensure local template cache directory exists and write atomically via temp file
+	_ = os.MkdirAll(cacheDir, 0755)
+	tmpFile, err := os.CreateTemp(cacheDir, safeID+"-*.tmp.zip")
 	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
+		// Fall back to OS temp dir if cache dir isn't writable
+		tmpFile, err = os.CreateTemp("", "template-*.zip")
+		if err != nil {
+			return fmt.Errorf("creating temp file: %w", err)
+		}
 	}
 	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
 
 	// Download ZIP to temp file
 	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("downloading template: %w", err)
 	}
 	_ = tmpFile.Close()
 
 	// Extract ZIP to workspace
 	if err := unzip.Extract(tmpPath, workspacePath); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("extracting template: %w", err)
+	}
+
+	// Persist verified ZIP into local cache atomically
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		_ = os.Remove(tmpPath)
 	}
 
 	s.logger.WithFields(logrus.Fields{
@@ -1244,15 +1364,17 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 	// Update goal to inform AI about workspace / template selection state
 	initialGoal := goal
 	if hadFilesBeforeRun {
-		initialGoal = fmt.Sprintf("%s\n\n(Note: This workspace ALREADY contains an existing website. Do NOT call fetchTemplates or useTemplate. Call readDesignIntelligence/readSiteMemory and readFile on the relevant existing files first, preserve the existing app, brand, and design system, and apply targeted editFile changes unless the user explicitly asks to start over or rebuild from scratch.)", goal)
+		if !strings.Contains(goal, "[Follow-Up Edit Mode]") {
+			initialGoal = fmt.Sprintf("%s\n\n(Note: This workspace ALREADY contains an existing website. Do NOT call fetchTemplates or useTemplate. Use readFiles on ONLY the specific files you need to edit, preserve the existing app, brand, and design system, and apply targeted editFile changes unless the user explicitly asks to start over or rebuild from scratch.)", goal)
+		}
 	} else if selectedTemplate != "" {
 		templateName := session.GetSelectedTemplateName()
 		if templateName == "" {
 			templateName = selectedTemplate // Fall back to ID if name not provided
 		}
-		initialGoal = fmt.Sprintf("%s\n\n(Note: The '%s' template is already loaded in this workspace. Do NOT call fetchTemplates or useTemplate. Build and customize src/custom.css and src/pages/Home.tsx cleanly, then run verifyBuild.)", goal, templateName)
+		initialGoal = fmt.Sprintf("%s\n\n(Note: The '%s' template is already loaded in this workspace. Do NOT read boilerplate files. Immediately write src/custom.css, components, and src/pages/Home.tsx in Turn 1 via writeFiles, then run verifyBuild.)", goal, templateName)
 	} else if workspaceHasFiles(workspacePath) {
-		initialGoal = fmt.Sprintf("%s\n\n(Note: The starter workspace is already loaded with src/pages/Home.tsx and src/custom.css. Do NOT call fetchTemplates or useTemplate. Replace src/pages/Home.tsx with the complete custom website requested by the user (keep '/' pointing to your customized homepage), style in src/custom.css, and run verifyBuild once complete.)", goal)
+		initialGoal = fmt.Sprintf("%s\n\n(Note: The fresh starter workspace is already loaded. Do NOT read boilerplate files or the placeholder Home.tsx. Immediately overwrite src/pages/Home.tsx and src/custom.css (plus components/routes as needed) in Turn 1 via writeFiles, then run verifyBuild once complete.)", goal)
 	} else {
 		initialGoal = fmt.Sprintf("%s\n\n(Note: No template was pre-selected. You MUST call fetchTemplates first to see available templates, then select the most appropriate one using useTemplate before doing any other work.)", goal)
 	}

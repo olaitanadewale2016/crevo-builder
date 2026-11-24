@@ -189,10 +189,40 @@ func (e *AEOExecutor) buildRobotsTxt() string {
 }
 
 func (e *AEOExecutor) injectJSONLD(memory map[string]interface{}) error {
+	jsonLD := e.buildJSONLD(memory)
+	// Use an encoder that doesn't escape HTML entities (& < >) for readability
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("    ", "  ")
+	if err := enc.Encode(jsonLD); err != nil {
+		return fmt.Errorf("cannot marshal JSON-LD: %w", err)
+	}
+	jsonLDBytes := strings.TrimSpace(buf.String())
+
+	scriptTag := fmt.Sprintf("    <script type=\"application/ld+json\">\n    %s\n    </script>\n", jsonLDBytes)
+
 	indexPath := filepath.Join(e.workspacePath, "index.html")
-	content, err := os.ReadFile(indexPath)
+	if err := injectJSONLDIntoHTMLFile(indexPath, scriptTag); err != nil {
+		return err
+	}
+
+	// If dist/index.html already exists, mirror the exact same JSON-LD into dist/index.html
+	// and refresh dist/.build_stamp so AEO injection NEVER forces a redundant second Vite build.
+	distIndexPath := filepath.Join(e.workspacePath, "dist", "index.html")
+	if info, err := os.Stat(distIndexPath); err == nil && !info.IsDir() {
+		if err := injectJSONLDIntoHTMLFile(distIndexPath, scriptTag); err == nil {
+			WriteBuildStamp(e.workspacePath)
+		}
+	}
+
+	return nil
+}
+
+func injectJSONLDIntoHTMLFile(filePath, scriptTag string) error {
+	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("cannot read index.html: %w", err)
+		return fmt.Errorf("cannot read %s: %w", filepath.Base(filePath), err)
 	}
 
 	html := string(content)
@@ -210,28 +240,14 @@ func (e *AEOExecutor) injectJSONLD(memory map[string]interface{}) error {
 		html = html[:existingStart] + html[existingStart+existingEnd+len(`</script>`):]
 	}
 
-	jsonLD := e.buildJSONLD(memory)
-	// Use an encoder that doesn't escape HTML entities (& < >) for readability
-	var buf strings.Builder
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("    ", "  ")
-	if err := enc.Encode(jsonLD); err != nil {
-		return fmt.Errorf("cannot marshal JSON-LD: %w", err)
-	}
-	jsonLDBytes := strings.TrimSpace(buf.String())
-
-	scriptTag := fmt.Sprintf("    <script type=\"application/ld+json\">\n    %s\n    </script>\n", jsonLDBytes)
-
 	// Inject before </head>
-	headClose := strings.Index(html, "</head>")
+	headClose := strings.Index(strings.ToLower(html), "</head>")
 	if headClose == -1 {
-		return fmt.Errorf("</head> tag not found in index.html")
+		return fmt.Errorf("</head> tag not found in %s", filepath.Base(filePath))
 	}
 
 	html = html[:headClose] + scriptTag + html[headClose:]
-
-	return os.WriteFile(indexPath, []byte(html), 0644)
+	return os.WriteFile(filePath, []byte(html), 0644)
 }
 
 func (e *AEOExecutor) buildJSONLD(memory map[string]interface{}) map[string]interface{} {

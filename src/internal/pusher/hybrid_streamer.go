@@ -35,16 +35,19 @@ func NewHybridStreamerWithLogger(pusherClient Client, webhookStreamer webhook.St
 	}
 }
 
-// SendStatus sends to BOTH Pusher (real-time UI) and webhook (for DB updates)
+// SendStatus sends to Pusher (real-time UI) and forwards only terminal/important
+// statuses to webhook (for DB updates) to avoid unnecessary HTTP round-trips.
 func (h *HybridStreamer) SendStatus(status, message string) {
 	h.pusher.SendStatus(status, message)
-	h.webhook.SendStatus(status, message)
+	switch status {
+	case "failed", "cancelled", "credit_limit", "completed":
+		h.webhook.SendStatus(status, message)
+	}
 }
 
-// SendThinking sends to both Pusher (real-time) and webhook (persistence)
+// SendThinking sends to Pusher (real-time) only; webhook treats thinking as a no-op when Pusher is active.
 func (h *HybridStreamer) SendThinking(content string, iteration int) {
 	h.pusher.SendThinking(content, iteration)
-	h.webhook.SendThinking(content, iteration)
 }
 
 // SendToolCall is a no-op - tool_call events contain large payloads (file contents)

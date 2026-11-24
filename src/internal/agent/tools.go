@@ -4,12 +4,56 @@ import (
 	"crevo-builder/internal/models"
 )
 
-// GetTools returns all available tools for the AI (30 tools)
+// ToolFilterOptions controls which tools are exposed to the LLM for a given session.
+type ToolFilterOptions struct {
+	WorkspaceHasFiles bool
+	FirebaseEnabled   bool
+	StorageEnabled    bool
+}
+
+// GetToolsForSession returns a lean, session-scoped tool set that eliminates scan-trap
+// and redundant tools (whose data is already inlined into the system prompt / messages)
+// while providing high-throughput batch tools (readFiles, writeFiles) and multi-hunk editFile.
+func GetToolsForSession(opts ToolFilterOptions) []models.ToolDefinition {
+	tools := []models.ToolDefinition{
+		WriteFilesTool(),
+		CreateFileTool(),
+		EditFileTool(),
+		ReadFilesTool(),
+		ReadFileTool(),
+		ListFilesTool(),
+		SearchFilesTool(),
+		BatchEditFilesTool(),
+		DeleteFileTool(),
+		VerifyBuildTool(),
+		WriteDesignIntelligenceTool(),
+		UpdateSiteMemoryTool(),
+		ListImagesTool(),
+	}
+
+	if !opts.WorkspaceHasFiles {
+		tools = append(tools,
+			FetchTemplatesTool(),
+			GetTemplateInfoTool(),
+			UseTemplateTool(),
+		)
+	}
+
+	if opts.FirebaseEnabled {
+		tools = append(tools, GetFirestoreCollectionsTool())
+	}
+
+	return tools
+}
+
+// GetTools returns all available tools for the AI (retained for backwards compatibility)
 func GetTools() []models.ToolDefinition {
 	return []models.ToolDefinition{
 		CreateFileTool(),
+		WriteFilesTool(),
 		EditFileTool(),
 		ReadFileTool(),
+		ReadFilesTool(),
 		ListFilesTool(),
 		SearchFilesTool(),
 		ListComponentsTool(),
@@ -40,25 +84,82 @@ func GetTools() []models.ToolDefinition {
 	}
 }
 
+func WriteFilesTool() models.ToolDefinition {
+	return models.ToolDefinition{
+		Name: "writeFiles",
+		Description: `Create or overwrite multiple files in a single tool call. Parent directories are created automatically.
+
+Best for: Initial website builds — write src/custom.css, modular components/data files, src/pages/Home.tsx, additional pages, and src/routes.tsx together in Turn 1.
+Do NOT write protected system files (src/index.css, index.html, src/main.tsx, package.json, vite.config.ts, tsconfig.json, template.json).
+For small surgical changes to an existing customized file, use editFile instead.`,
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"files": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"path": map[string]interface{}{
+								"type":        "string",
+								"description": "The file path relative to project root (e.g., 'src/pages/Home.tsx')",
+							},
+							"content": map[string]interface{}{
+								"type":        "string",
+								"description": "The complete file content",
+							},
+						},
+						"required": []string{"path", "content"},
+					},
+					"description": "List of files to create or overwrite in one call",
+				},
+			},
+			"required": []string{"files"},
+		},
+	}
+}
+
+func ReadFilesTool() models.ToolDefinition {
+	return models.ToolDefinition{
+		Name: "readFiles",
+		Description: `Read up to 10 workspace files in parallel in a single tool call.
+
+Use this on follow-up edits to read ONLY the specific pages or custom components you need to modify.
+NEVER read boilerplate files already provided in the Workspace Reference (src/components/ui/*, src/index.css, src/main.tsx, src/App.tsx, src/components/ThemeToggle.tsx, package.json, vite.config.ts, tsconfig.json, template.json).`,
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"paths": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "string",
+					},
+					"description": "Relative file paths to read (max 10, e.g., ['src/pages/Home.tsx', 'src/custom.css'])",
+				},
+			},
+			"required": []string{"paths"},
+		},
+	}
+}
+
 func CreateFileTool() models.ToolDefinition {
 	return models.ToolDefinition{
 		Name: "createFile",
-		Description: `Create or OVERWRITE a file with specified content. WARNING: This replaces existing content entirely.
+		Description: `Create or OVERWRITE a single file with specified content. WARNING: This replaces existing content entirely.
 
 Key behaviors:
-- Parent directories are created automatically (no need to create them first)
-- TypeScript/TSX files are validated for syntax after creation. If validation fails, an error is returned so you can fix it.
-- Use readFile first if you need to preserve parts of an existing file.
-- Best for: NEW files only, or complete rewrites when editFile would require too many changes (>20 lines).
-- WARNING: When the user asks for a small change (button fix, color change, text update), NEVER use createFile on an existing file. Use editFile instead. Using createFile for small fixes will destroy the user's existing design.
+- Parent directories are created automatically.
+- Prefer writeFiles when creating 2+ files in the same turn.
+- Best for: NEW files, fresh starter Home.tsx replacement, or complete rewrites when editFile would require too many changes (>20 lines).
+- WARNING: When the user asks for a small change (button fix, color change, text update) on an already-customized file, use editFile instead so existing design is preserved.
 
-Returns: success confirmation with byte count, or syntax error details for .ts/.tsx files.`,
+Returns: success confirmation with byte count and any import/content warnings.`,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "The file path relative to project root (e.g., 'src/components/Button.tsx')",
+					"description": "The file path relative to project root (e.g., 'src/components/Navbar.tsx')",
 				},
 				"content": map[string]interface{}{
 					"type":        "string",
@@ -73,16 +174,14 @@ Returns: success confirmation with byte count, or syntax error details for .ts/.
 func EditFileTool() models.ToolDefinition {
 	return models.ToolDefinition{
 		Name: "editFile",
-		Description: `Edit an existing file using EXACT search/replace. Safety features prevent file corruption:
-1. Search string must match EXACTLY including all whitespace and newlines
-2. If multiple matches found, you must either add more context OR set replaceAll=true
-3. For .ts/.tsx files: syntax is validated on a temp copy BEFORE saving - the original file is unchanged if validation fails
-4. Large deletions (>50% of file) are blocked - use createFile instead
+		Description: `Edit an existing file using EXACT search/replace. Supports either a single search/replace pair OR multiple sequential edits via the 'edits' array in one call.
 
-Best for: Small targeted changes (<20 lines), className updates, adding/removing imports
-For larger changes: Use createFile to replace the entire file
+Safety checks:
+1. Search string must match EXACTLY including whitespace and newlines
+2. If multiple matches are found, add more context OR set replaceAll=true
+3. Large deletions (>50% of file) are blocked — use createFile for full rewrites
 
-Returns: success message, 'Search string not found', 'Multiple matches found', or syntax error details`,
+Best for: Targeted edits, className updates, adding/removing sections or imports, or applying multiple hunks to one file in a single call.`,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -92,18 +191,40 @@ Returns: success message, 'Search string not found', 'Multiple matches found', o
 				},
 				"search": map[string]interface{}{
 					"type":        "string",
-					"description": "The EXACT text to find (must match perfectly including whitespace)",
+					"description": "The EXACT text to find (use for single edit; omit when using 'edits')",
 				},
 				"replace": map[string]interface{}{
 					"type":        "string",
-					"description": "The text to replace the search text with",
+					"description": "The text to replace the search text with (use for single edit; omit when using 'edits')",
 				},
 				"replaceAll": map[string]interface{}{
 					"type":        "boolean",
 					"description": "If true, replace all occurrences. Required if multiple matches exist.",
 				},
+				"edits": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"search": map[string]interface{}{
+								"type":        "string",
+								"description": "The EXACT text to find",
+							},
+							"replace": map[string]interface{}{
+								"type":        "string",
+								"description": "The replacement text",
+							},
+							"replaceAll": map[string]interface{}{
+								"type":        "boolean",
+								"description": "If true, replace all occurrences of this hunk",
+							},
+						},
+						"required": []string{"search", "replace"},
+					},
+					"description": "Optional array of multiple search/replace hunks to apply sequentially to this file in one call",
+				},
 			},
-			"required": []string{"path", "search", "replace"},
+			"required": []string{"path"},
 		},
 	}
 }
@@ -111,7 +232,7 @@ Returns: success message, 'Search string not found', 'Multiple matches found', o
 func ReadFileTool() models.ToolDefinition {
 	return models.ToolDefinition{
 		Name:        "readFile",
-		Description: "Read the contents of a file. ALWAYS use this to understand existing code BEFORE making modifications. Returns the full file content or an error if the file doesn't exist. Use listFiles first if you're unsure whether a file exists.",
+		Description: "Read a single existing file before making targeted edits (use readFiles when reading 2+ files). NEVER read boilerplate files already provided in the Workspace Reference (src/components/ui/*, src/index.css, src/main.tsx, src/App.tsx, src/components/ThemeToggle.tsx, package.json, vite.config.ts, tsconfig.json, template.json).",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -305,7 +426,7 @@ func VerifyBuildTool() models.ToolDefinition {
 CRITICAL TIMING RULES:
 - Call this tool ONLY ONCE at the very end of your task, after ALL page files, components, and routes have been created or modified.
 - NEVER call verifyBuild in the middle of creating pages or after every single file change. Intermediate builds waste time and fail because files reference each other before all are written.
-- Standard flow: Create/edit files -> Update routes -> Run verifyIntegration -> Run verifyBuild ONCE at the end.
+- Standard flow: Write/edit all website files (via writeFiles/createFile/editFile) -> Update routes if needed -> Run verifyBuild ONCE at the end.
 
 Key behaviors:
 - Compiles the project and verifies all imports and JSX syntax
@@ -459,7 +580,7 @@ Efficient for:
 
 Returns list of modified files with replacement counts.
 
-IMPORTANT: Performs actual file modifications. TypeScript files are validated before saving. Use diffPreview first if unsure about impact.`,
+IMPORTANT: Performs actual file modifications across matched files. Run verifyBuild once after completing all edits.`,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

@@ -10,6 +10,7 @@ package executor
 // Note: verifyBuild is excluded from read-only as it runs npm which can mutate node_modules
 var readOnlyTools = map[string]bool{
 	"readFile":                true,
+	"readFiles":               true,
 	"listFiles":               true,
 	"searchFiles":             true,
 	"listComponents":          true,
@@ -30,15 +31,10 @@ var readOnlyTools = map[string]bool{
 	"readSiteMemory":          true, // Reads memory.json (no mutations)
 	"listImages":              true, // Searches stock image registry (no file system)
 	"getImageUsage":           true, // Returns image usage info (no file system)
-	// Write tools (must be sequential):
-	// - createFile
-	// - editFile
-	// - deleteFile
-	// - verifyBuild (runs npm commands that can mutate state)
-	// - useTemplate (downloads and extracts files)
-	// - batchEditFiles
-	// - writeDesignIntelligence (writes design-intelligence.json)
-	// - updateSiteMemory (writes memory.json)
+	// Write tools:
+	// - createFile / editFile (parallelizable across distinct normalized paths)
+	// - writeFiles / deleteFile / verifyBuild / useTemplate / batchEditFiles (sequential)
+	// - writeDesignIntelligence / updateSiteMemory (sequential)
 }
 
 // IsReadOnly returns true if the tool is safe to run in parallel
@@ -46,17 +42,22 @@ func IsReadOnly(toolName string) bool {
 	return readOnlyTools[toolName]
 }
 
+// IsReadOnlyTool is an alias for IsReadOnly
+func IsReadOnlyTool(toolName string) bool {
+	return IsReadOnly(toolName)
+}
+
 // IsWriteTool returns true if the tool is a direct file write operation (create/edit/delete).
 // Used only in tests. For file change tracking (build triggers), use IsFileModifying instead.
 func IsWriteTool(toolName string) bool {
-	return toolName == "createFile" || toolName == "writeFile" || toolName == "editFile" || toolName == "deleteFile"
+	return toolName == "createFile" || toolName == "writeFile" || toolName == "writeFiles" || toolName == "editFile" || toolName == "deleteFile"
 }
 
 // IsFileModifying returns true if the tool creates, edits, deletes, or extracts files.
 // Used by Execute() to track whether a workspace file was mutated.
 func IsFileModifying(toolName string) bool {
 	switch toolName {
-	case "createFile", "writeFile", "editFile", "batchEditFiles", "deleteFile", "useTemplate",
+	case "createFile", "writeFile", "writeFiles", "editFile", "batchEditFiles", "deleteFile", "useTemplate",
 		"writeDesignIntelligence", "updateSiteMemory", "generateAEO":
 		return true
 	default:
@@ -74,6 +75,20 @@ func IsCodeModifying(toolName string, args map[string]interface{}) bool {
 			if p == "memory.json" || p == "design-intelligence.json" || p == "template.json" {
 				return false
 			}
+		}
+		return true
+	case "writeFiles":
+		if filesRaw, ok := args["files"].([]interface{}); ok {
+			for _, item := range filesRaw {
+				if m, ok := item.(map[string]interface{}); ok {
+					if p, ok := m["path"].(string); ok {
+						if p != "memory.json" && p != "design-intelligence.json" && p != "template.json" {
+							return true
+						}
+					}
+				}
+			}
+			return false
 		}
 		return true
 	case "batchEditFiles":
@@ -99,8 +114,10 @@ type BatchResult struct {
 func GetAllTools() []string {
 	return []string{
 		"createFile",
+		"writeFiles",
 		"editFile",
 		"readFile",
+		"readFiles",
 		"listFiles",
 		"searchFiles",
 		"listComponents",

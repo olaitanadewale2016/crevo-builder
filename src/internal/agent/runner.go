@@ -244,8 +244,7 @@ func getToolRecoveryGuidance(toolName string) string {
 1. Read the error message - look for the specific line/column with the syntax issue
 2. Check for: missing closing brackets }, unclosed JSX tags </>, unmatched quotes
 3. Verify all imports reference files that actually exist
-4. Ensure there's exactly ONE default export
-5. Use diffPreview first to see what would change`
+4. Ensure there's exactly ONE default export`
 	case "verifyBuild":
 		return `RECOVERY STEPS:
 1. Read the SPECIFIC file and line mentioned in the error using readFile
@@ -353,10 +352,11 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		tokenBudget = int(float64(r.aiConfig.ContextWindow) * 0.4)
 	}
 
-	// Build system prompt with template injections
+	// Build system prompt with template injections and workspace reference
 	promptCfg := PromptConfig{
 		ProjectName:      "Project",
 		WorkspacePath:    r.executor.GetWorkspacePath(),
+		Goal:             goal,
 		TemplatePrompts:  templatePrompts,
 		TemplateMetadata: templateMetadata,
 		Capabilities:     session.GetProjectCapabilities(),
@@ -529,7 +529,13 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		Content: goal,
 	})
 
-	tools := GetTools()
+	sessionCaps := session.GetProjectCapabilities()
+	toolFilterOpts := ToolFilterOptions{
+		WorkspaceHasFiles: workspaceHasSourceFiles(workspaceDir),
+		FirebaseEnabled:   sessionCaps != nil && sessionCaps.Firebase != nil && sessionCaps.Firebase.Enabled,
+		StorageEnabled:    sessionCaps != nil && sessionCaps.Storage != nil && sessionCaps.Storage.Enabled,
+	}
+	tools := GetToolsForSession(toolFilterOpts)
 
 	// Send initial status
 	streamer.SendStatus("running", "Let's build something awesome...")
@@ -546,9 +552,10 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 	const maxBuildFixes = 3
 	var lastBuildError string
 
-	// Empty response / no-code nudges: prevent premature completion before writing website code
+	// Empty response / no-code nudges & excessive scan steering
 	emptyResponseNudged := false
 	noCodeNudges := 0
+	consecutiveReadOnlyTurns := 0
 
 	// Set model-appropriate circuit breaker thresholds
 	session.SetCircuitBreakerForModel(r.aiConfig.ProviderType, r.aiConfig.Model)
@@ -1129,6 +1136,12 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 				}
 				session.SetBuildResult(success, message)
 			}
+
+			// If useTemplate succeeded on a previously empty workspace, prune template tools immediately
+			if toolName == "useTemplate" && result.Success && !toolFilterOpts.WorkspaceHasFiles {
+				toolFilterOpts.WorkspaceHasFiles = true
+				tools = GetToolsForSession(toolFilterOpts)
+			}
 		}
 
 		// Circuit breaker: detect repeated failures and prevent infinite loops
@@ -1241,6 +1254,39 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 			})
 		}
 
+		// Steering guard: prevent wasted read-only scanning turns or reading src/components/ui/* boilerplate
+		allReadOnly := len(response.ToolCalls) > 0
+		readUIPrimitive := false
+		for _, tc := range response.ToolCalls {
+			if !executor.IsReadOnly(tc.Name) {
+				allReadOnly = false
+			}
+			if isReadingUIPrimitive(tc) {
+				readUIPrimitive = true
+			}
+		}
+		if allReadOnly {
+			consecutiveReadOnlyTurns++
+		} else {
+			consecutiveReadOnlyTurns = 0
+		}
+		if readUIPrimitive || consecutiveReadOnlyTurns >= 2 {
+			steerMsg := "STOP scanning more files — all project structure, component exports, packages, routes, and stock images are already in your Workspace Reference. Write the website files NOW using writeFiles (or parallel createFile/editFile calls), then call verifyBuild."
+			if readUIPrimitive {
+				steerMsg = "STOP reading files under src/components/ui/ — every shadcn/ui export is already listed in your Workspace Reference. Write the website files NOW using writeFiles (or parallel createFile/editFile calls), then call verifyBuild."
+			}
+			messages = append(messages, models.Message{
+				Role:    "user",
+				Content: steerMsg,
+			})
+			consecutiveReadOnlyTurns = 0
+			r.logger.WithFields(logrus.Fields{
+				"session_id":        session.ID,
+				"iteration":         iterationsRun,
+				"read_ui_primitive": readUIPrimitive,
+			}).Debug("Injected anti-scan steering nudge")
+		}
+
 		// Auto-compaction: check if context is getting too large (if enabled)
 		contextTokens := summarizer.EstimateConversationTokens(messages)
 		session.SetContextTokens(contextTokens)
@@ -1299,14 +1345,20 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 					})
 
 					// Rebuild messages with summary
-					// Re-load template prompts in case the AI selected a template during the run
-					compactTemplatePrompts := r.loadTemplatePrompts(r.executor.GetWorkspacePath())
+					// Re-load template prompts & metadata in case the AI selected a template during the run
+					compactWorkspace := r.executor.GetWorkspacePath()
+					compactTemplatePrompts := r.loadTemplatePrompts(compactWorkspace)
+					compactTemplateMetadata := r.loadTemplateMetadata(compactWorkspace)
 					compactCfg := PromptConfig{
-						ProjectName:     "Project",
-						WorkspacePath:   r.executor.GetWorkspacePath(),
-						TemplatePrompts: compactTemplatePrompts,
-						Capabilities:    session.GetProjectCapabilities(),
-						ThemePreset:     session.GetThemePreset(),
+						ProjectName:      "Project",
+						WorkspacePath:    compactWorkspace,
+						Goal:             goal,
+						TemplatePrompts:  compactTemplatePrompts,
+						TemplateMetadata: compactTemplateMetadata,
+						Capabilities:     session.GetProjectCapabilities(),
+						ThemePreset:      session.GetThemePreset(),
+						Compact:          promptCfg.Compact,
+						TokenBudget:      tokenBudget,
 					}
 					if cp := session.GetCustomPrompts(); cp != nil {
 						compactCfg.CustomPrompt = cp.SystemPrompt
@@ -1316,6 +1368,12 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 					if promptErr != nil {
 						r.logger.WithField("error", promptErr.Error()).Warn("Failed to build compact prompt during compaction, using current prompt")
 						break
+					}
+					switch r.aiConfig.ReasoningEffort {
+					case "low":
+						systemPrompt += "\n\n[EFFORT LEVEL: LOW — FAST MODE]\nExecute the request directly and concisely in as few tool calls as possible. Skip lengthy exploratory planning and focus on immediate, high-speed delivery."
+					case "high":
+						systemPrompt += "\n\n[EFFORT LEVEL: HIGH — DEEP ARCHITECTURAL MODE]\nApply deep reasoning, comprehensive UI/UX polish, rich micro-interactions, responsive layouts, and thorough multi-component implementation."
 					}
 					newMessages := []models.Message{
 						{Role: "system", Content: systemPrompt},
@@ -1472,6 +1530,7 @@ func (r *Runner) synthesizeBuildSummary(workspacePath string, session *Session, 
 	leaksInternalTools := strings.Contains(lowerTrimmed, "verifybuild") ||
 		strings.Contains(lowerTrimmed, "verifyintegration") ||
 		strings.Contains(lowerTrimmed, "createfile") ||
+		strings.Contains(lowerTrimmed, "writefiles") ||
 		strings.Contains(lowerTrimmed, "editfile")
 	if !leaksInternalTools && len(trimmed) > 200 && (strings.Contains(trimmed, "###") || strings.Contains(trimmed, "- ") || strings.Contains(trimmed, "* ")) {
 		return trimmed
@@ -1589,6 +1648,8 @@ func scanPageFiles(workspacePath string) []string {
 // Read/analysis tools benefit from larger results. Other tools use a default.
 func maxResultForTool(toolName string) int {
 	switch toolName {
+	case "readFiles":
+		return 16000
 	case "verifyBuild":
 		return 12000
 	case "readFile", "analyzeProject", "searchFiles":
@@ -1649,10 +1710,20 @@ func getActionDescription(toolName string, args map[string]interface{}) (action,
 	switch toolName {
 	case "createFile":
 		return randomPhrase(createPhrases), path, "creating"
+	case "writeFiles":
+		if filesRaw, ok := args["files"].([]interface{}); ok && len(filesRaw) > 0 {
+			return randomPhrase(createPhrases), fmt.Sprintf("%d files", len(filesRaw)), "creating"
+		}
+		return randomPhrase(createPhrases), "website files", "creating"
 	case "editFile":
 		return randomPhrase(editPhrases), path, "editing"
 	case "readFile":
 		return randomPhrase(readPhrases), path, "reading"
+	case "readFiles":
+		if pathsRaw, ok := args["paths"].([]interface{}); ok && len(pathsRaw) > 0 {
+			return randomPhrase(readPhrases), fmt.Sprintf("%d files", len(pathsRaw)), "reading"
+		}
+		return randomPhrase(readPhrases), "project files", "reading"
 	case "listFiles":
 		return randomPhrase(explorePhrases), "project structure", "exploring"
 	case "listComponents":
@@ -1693,4 +1764,41 @@ func getActionDescription(toolName string, args map[string]interface{}) (action,
 		}
 		return "Working on", "your website", ""
 	}
+}
+
+// workspaceHasSourceFiles returns true if the workspace already has initialized source files or template.json.
+func workspaceHasSourceFiles(workspacePath string) bool {
+	if _, err := os.Stat(filepath.Join(workspacePath, "template.json")); err == nil {
+		return true
+	}
+	srcDir := filepath.Join(workspacePath, "src")
+	if entries, err := os.ReadDir(srcDir); err == nil && len(entries) > 0 {
+		return true
+	}
+	return false
+}
+
+// isReadingUIPrimitive returns true if a readFile/readFiles call targets any path under src/components/ui/.
+func isReadingUIPrimitive(tc models.ToolCall) bool {
+	checkPath := func(p string) bool {
+		norm := strings.ToLower(filepath.ToSlash(strings.TrimSpace(p)))
+		norm = strings.TrimPrefix(norm, "./")
+		return strings.HasPrefix(norm, "src/components/ui/") || strings.Contains(norm, "/components/ui/")
+	}
+
+	switch tc.Name {
+	case "readFile":
+		if p, ok := tc.Arguments["path"].(string); ok {
+			return checkPath(p)
+		}
+	case "readFiles":
+		if pathsRaw, ok := tc.Arguments["paths"].([]interface{}); ok {
+			for _, item := range pathsRaw {
+				if p, ok := item.(string); ok && checkPath(p) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

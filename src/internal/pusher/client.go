@@ -65,7 +65,9 @@ func NewClient(cfg *Config) (*PusherClient, error) {
 		HTTPClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
-				DisableKeepAlives: true,
+				MaxIdleConns:        16,
+				MaxIdleConnsPerHost: 8,
+				IdleConnTimeout:     60 * time.Second,
 			},
 		},
 	}

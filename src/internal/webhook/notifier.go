@@ -97,15 +97,23 @@ func newNotifier(ctx context.Context, cancel context.CancelFunc, webhookURL, ser
 		retryDelay: retryDelay,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        16,
+				MaxIdleConnsPerHost: 8,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
 		ctx:        ctx,
 		cancel:     cancel,
 		eventQueue: make(chan WebhookPayload, 100),
 	}
 
-	// Start background worker
-	n.wg.Add(1)
-	go n.worker()
+	// Start 3 background worker goroutines to prevent single-thread webhook stalls
+	const workerCount = 3
+	for i := 0; i < workerCount; i++ {
+		n.wg.Add(1)
+		go n.worker()
+	}
 
 	return n
 }
@@ -427,7 +435,8 @@ func (n *Notifier) SendSummarizationComplete(data models.SummarizationEventData)
 	n.queueEvent(models.EventSummarizationComplete, data)
 }
 
-// Close stops the notifier and waits for pending events to drain
+// Close stops the notifier and waits up to 3 seconds for pending events to drain
+// so stale/slow webhook events never block build completion.
 func (n *Notifier) Close() {
 	n.mu.Lock()
 	if n.closed {
@@ -437,10 +446,24 @@ func (n *Notifier) Close() {
 	n.closed = true
 	n.mu.Unlock()
 
-	// Close the queue so worker knows no more events are coming
+	// Close the queue so workers know no more events are coming
 	close(n.eventQueue)
-	// Wait for worker to drain remaining queued events
-	n.wg.Wait()
-	// Then cancel context (cleanup)
+
+	// Wait for workers to drain remaining queued events, capped at 3 seconds
+	done := make(chan struct{})
+	go func() {
+		n.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		// Abort stalled in-flight HTTP requests so workers exit cleanly
+		n.cancel()
+		<-done
+	}
+
+	// Ensure context is always cancelled for cleanup
 	n.cancel()
 }

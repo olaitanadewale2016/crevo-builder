@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"crevo-builder/internal/models"
@@ -229,21 +230,62 @@ func (e *FileExecutor) validateTypeScript(ctx context.Context, filePath string) 
 	return nil
 }
 
-// EditFile edits an existing file using search/replace with safety checks
+type fileEditHunk struct {
+	search     string
+	replace    string
+	replaceAll bool
+}
+
+// EditFile edits an existing file using exact search/replace with safety checks.
+// Supports both top-level search/replace (backward-compatible) and an optional
+// `edits: [{search, replace, replaceAll?}]` array for multi-hunk edits in one call.
 func (e *FileExecutor) EditFile(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
 	path, ok := args["path"].(string)
-	if !ok {
+	if !ok || strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("path is required")
 	}
-	search, ok := args["search"].(string)
-	if !ok {
-		return nil, fmt.Errorf("search is required")
+
+	var hunks []fileEditHunk
+	if editsRaw, hasEdits := args["edits"].([]interface{}); hasEdits && len(editsRaw) > 0 {
+		for idx, item := range editsRaw {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				return &ToolResult{
+					Success: false,
+					Content: fmt.Sprintf("Invalid edit hunk at index %d: expected object with search and replace", idx),
+				}, nil
+			}
+			s, sOK := m["search"].(string)
+			r, rOK := m["replace"].(string)
+			if !sOK || s == "" || !rOK {
+				return &ToolResult{
+					Success: false,
+					Content: fmt.Sprintf("Invalid edit hunk at index %d: non-empty search and replace strings are required", idx),
+				}, nil
+			}
+			ra, _ := m["replaceAll"].(bool)
+			hunks = append(hunks, fileEditHunk{
+				search:     s,
+				replace:    r,
+				replaceAll: ra,
+			})
+		}
+	} else {
+		search, ok := args["search"].(string)
+		if !ok {
+			return nil, fmt.Errorf("search is required (or provide edits array)")
+		}
+		replace, ok := args["replace"].(string)
+		if !ok {
+			return nil, fmt.Errorf("replace is required (or provide edits array)")
+		}
+		replaceAll, _ := args["replaceAll"].(bool)
+		hunks = []fileEditHunk{{
+			search:     search,
+			replace:    replace,
+			replaceAll: replaceAll,
+		}}
 	}
-	replace, ok := args["replace"].(string)
-	if !ok {
-		return nil, fmt.Errorf("replace is required")
-	}
-	replaceAll, _ := args["replaceAll"].(bool)
 
 	// Validate path for writing (stricter than read)
 	if err := e.validatePathForWrite(path); err != nil {
@@ -272,76 +314,55 @@ func (e *FileExecutor) EditFile(ctx context.Context, args map[string]interface{}
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 	originalContent := string(data)
+	newContent := originalContent
+	totalReplacements := 0
 
-	// SAFETY CHECK 1: Exact match required
-	if !strings.Contains(originalContent, search) {
-		// Try to find similar matches for helpful error
-		hint := findSimilarMatch(originalContent, search)
-		hintMsg := ""
-		if hint != "" {
-			hintMsg = fmt.Sprintf("\n\nDid you mean:\n%s", truncateForHint(hint, 200))
+	for idx, hunk := range hunks {
+		hunkPrefix := ""
+		if len(hunks) > 1 {
+			hunkPrefix = fmt.Sprintf("Edit hunk #%d: ", idx+1)
 		}
-		return &ToolResult{
-			Success: false,
-			Content: fmt.Sprintf("Search string not found in %s. The content must match EXACTLY including whitespace.%s", path, hintMsg),
-		}, nil
+
+		// SAFETY CHECK 1: Exact match required
+		if !strings.Contains(newContent, hunk.search) {
+			hint := findSimilarMatch(newContent, hunk.search)
+			hintMsg := ""
+			if hint != "" {
+				hintMsg = fmt.Sprintf("\n\nDid you mean:\n%s", truncateForHint(hint, 200))
+			}
+			return &ToolResult{
+				Success: false,
+				Content: fmt.Sprintf("%sSearch string not found in %s. The content must match EXACTLY including whitespace.%s", hunkPrefix, path, hintMsg),
+			}, nil
+		}
+
+		// SAFETY CHECK 2: Ambiguous matches
+		count := strings.Count(newContent, hunk.search)
+		if count > 1 && !hunk.replaceAll {
+			return &ToolResult{
+				Success: false,
+				Content: fmt.Sprintf("%sFound %d matches in %s. Either:\n1. Add more context to make search unique\n2. Set replaceAll=true to replace all occurrences", hunkPrefix, count, path),
+			}, nil
+		}
+
+		// Perform replacement
+		if hunk.replaceAll {
+			newContent = strings.ReplaceAll(newContent, hunk.search, hunk.replace)
+			totalReplacements += count
+		} else {
+			newContent = strings.Replace(newContent, hunk.search, hunk.replace, 1)
+			totalReplacements++
+		}
 	}
 
-	// SAFETY CHECK 2: Ambiguous matches
-	count := strings.Count(originalContent, search)
-	if count > 1 && !replaceAll {
-		return &ToolResult{
-			Success: false,
-			Content: fmt.Sprintf("Found %d matches in %s. Either:\n1. Add more context to make search unique\n2. Set replaceAll=true to replace all occurrences", count, path),
-		}, nil
-	}
-
-	// SAFETY CHECK 3: Validate size change isn't too drastic
+	// SAFETY CHECK 3: Validate overall size change isn't too drastic
 	// Prevents accidental file truncation/corruption
-	sizeDiff := len(replace) - len(search)
 	originalSize := len(originalContent)
-	if sizeDiff < 0 && originalSize > 100 && float64(-sizeDiff*count)/float64(originalSize) > 0.5 {
+	if originalSize > 100 && len(newContent) < originalSize/2 {
 		return &ToolResult{
 			Success: false,
 			Content: "This edit would remove more than 50% of the file. Use createFile to replace the entire file instead.",
 		}, nil
-	}
-
-	// Perform replacement
-	var newContent string
-	if replaceAll {
-		newContent = strings.ReplaceAll(originalContent, search, replace)
-	} else {
-		newContent = strings.Replace(originalContent, search, replace, 1)
-	}
-
-	// SAFETY CHECK 4: Validate TypeScript/TSX syntax before saving
-	if strings.HasSuffix(path, ".tsx") || strings.HasSuffix(path, ".ts") {
-		// Create unique temp file to avoid race conditions
-		ext := filepath.Ext(fullPath)
-		baseName := strings.TrimSuffix(filepath.Base(fullPath), ext)
-
-		tmpFile, err := os.CreateTemp(filepath.Dir(fullPath), baseName+".*.tmp"+ext)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create temp file: %w", err)
-		}
-		tmpPath := tmpFile.Name()
-
-		// Write content to temp file
-		if _, err := tmpFile.WriteString(newContent); err != nil {
-			_ = tmpFile.Close()
-			_ = os.Remove(tmpPath)
-			return nil, fmt.Errorf("failed to write temp file: %w", err)
-		}
-		_ = tmpFile.Close()
-		defer func() { _ = os.Remove(tmpPath) }()
-
-		if err := e.validateTypeScript(ctx, tmpPath); err != nil {
-			return &ToolResult{
-				Success: false,
-				Content: fmt.Sprintf("Edit would introduce syntax errors:\n%s\n\nOriginal file unchanged.", err.Error()),
-			}, nil
-		}
 	}
 
 	// Sanitize src/custom.css (hoist Google Fonts into index.html & normalize HSL color tokens) before saving
@@ -358,12 +379,12 @@ func (e *FileExecutor) EditFile(ctx context.Context, args map[string]interface{}
 		newContent = NormalizeCSSContent(newContent, fullPath, e.workspacePath)
 	}
 
-	// Write updated content
+	// Write updated content (skip per-edit esbuild subprocess; verifyBuild validates entire project once)
 	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
 
-	result := fmt.Sprintf("File edited: %s (%d replacement(s))", path, count)
+	result := fmt.Sprintf("File edited: %s (%d replacement(s))", path, totalReplacements)
 
 	// Check for missing imports (non-blocking warnings)
 	if warnings := validateImports(fullPath, e.workspacePath); len(warnings) > 0 {
@@ -373,6 +394,158 @@ func (e *FileExecutor) EditFile(ctx context.Context, args map[string]interface{}
 	return &ToolResult{
 		Success: true,
 		Content: result,
+	}, nil
+}
+
+// WriteFiles creates or overwrites multiple files in one tool call using CreateFile's
+// full validation, CSS sanitization, and warning pipeline.
+func (e *FileExecutor) WriteFiles(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+	filesRaw, ok := args["files"].([]interface{})
+	if !ok || len(filesRaw) == 0 {
+		return &ToolResult{
+			Success: false,
+			Content: "files array is required and must contain at least one {path, content} object",
+		}, nil
+	}
+
+	var results []string
+	succeeded := 0
+	failed := 0
+
+	for idx, item := range filesRaw {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			failed++
+			results = append(results, fmt.Sprintf("- [item %d] Error: expected object with path and content", idx))
+			continue
+		}
+		pathVal, pOK := m["path"].(string)
+		contentVal, cOK := m["content"].(string)
+		if !pOK || strings.TrimSpace(pathVal) == "" || !cOK {
+			failed++
+			results = append(results, fmt.Sprintf("- [item %d] Error: path and content strings are required", idx))
+			continue
+		}
+
+		res, err := e.CreateFile(ctx, map[string]interface{}{
+			"path":    pathVal,
+			"content": contentVal,
+		})
+		if err != nil {
+			failed++
+			results = append(results, fmt.Sprintf("- %s: Error: %s", pathVal, err.Error()))
+			continue
+		}
+		if res.Success {
+			succeeded++
+			results = append(results, "- "+res.Content)
+		} else {
+			failed++
+			results = append(results, fmt.Sprintf("- %s: %s", pathVal, res.Content))
+		}
+	}
+
+	summary := fmt.Sprintf("Wrote %d/%d files:\n%s", succeeded, len(filesRaw), strings.Join(results, "\n"))
+	return &ToolResult{
+		Success: failed == 0 && succeeded > 0,
+		Content: summary,
+	}, nil
+}
+
+// ReadFiles reads up to 10 workspace files in parallel in a single tool call,
+// skipping node_modules/dist and safely truncating oversized files.
+func (e *FileExecutor) ReadFiles(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+	const maxBatchFiles = 10
+	const maxPerFileBytes = 12000
+
+	var paths []string
+	switch v := args["paths"].(type) {
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				paths = append(paths, strings.TrimSpace(s))
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if strings.TrimSpace(s) != "" {
+				paths = append(paths, strings.TrimSpace(s))
+			}
+		}
+	}
+
+	if len(paths) == 0 {
+		return &ToolResult{
+			Success: false,
+			Content: "paths array is required and must contain at least one file path",
+		}, nil
+	}
+
+	truncatedListNote := ""
+	if len(paths) > maxBatchFiles {
+		truncatedListNote = fmt.Sprintf("\n(Note: capped at %d files; %d additional path(s) omitted)\n", maxBatchFiles, len(paths)-maxBatchFiles)
+		paths = paths[:maxBatchFiles]
+	}
+
+	outputs := make([]string, len(paths))
+	succeeded := make([]bool, len(paths))
+
+	var wg sync.WaitGroup
+	for i, p := range paths {
+		wg.Add(1)
+		go func(idx int, relPath string) {
+			defer wg.Done()
+
+			slashPath := filepath.ToSlash(filepath.Clean(relPath))
+			if containsPathSegment(slashPath, "node_modules") || containsPathSegment(slashPath, "dist") {
+				outputs[idx] = fmt.Sprintf("=== %s ===\n[Skipped: access to node_modules/dist is not allowed]", relPath)
+				return
+			}
+
+			if err := e.validatePath(relPath); err != nil {
+				outputs[idx] = fmt.Sprintf("=== %s ===\n[Error: %s]", relPath, err.Error())
+				return
+			}
+
+			fullPath := filepath.Join(e.workspacePath, relPath)
+			data, err := os.ReadFile(fullPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					outputs[idx] = fmt.Sprintf("=== %s ===\n[File not found]", relPath)
+				} else {
+					outputs[idx] = fmt.Sprintf("=== %s ===\n[Read error: %s]", relPath, err.Error())
+				}
+				return
+			}
+
+			content := string(data)
+			if len(content) > maxPerFileBytes {
+				content = content[:maxPerFileBytes] + fmt.Sprintf("\n\n... (truncated at %d of %d bytes) ...", maxPerFileBytes, len(data))
+			}
+
+			outputs[idx] = fmt.Sprintf("=== %s ===\n%s", relPath, content)
+			succeeded[idx] = true
+		}(i, p)
+	}
+	wg.Wait()
+
+	anySuccess := false
+	for _, ok := range succeeded {
+		if ok {
+			anySuccess = true
+			break
+		}
+	}
+
+	return &ToolResult{
+		Success: anySuccess,
+		Content: strings.Join(outputs, "\n\n") + truncatedListNote,
 	}, nil
 }
 

@@ -113,33 +113,13 @@ func (e *FileExecutor) batchEditFiles(ctx context.Context, args map[string]inter
 			newContent = strings.Replace(originalContent, search, replace, 1)
 		}
 
-		// Validate TypeScript/TSX syntax before committing
-		if strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".ts") {
-			dir := filepath.Dir(fullPath)
-			base := filepath.Base(fullPath)
-			ext := filepath.Ext(base)
-			nameNoExt := strings.TrimSuffix(base, ext)
-
-			tmpFile, tmpErr := os.CreateTemp(dir, nameNoExt+".batch_*.tmp"+ext)
-			if tmpErr != nil {
-				errors = append(errors, fmt.Sprintf("- %s: temp file error: %s", filePath, tmpErr.Error()))
-				continue
-			}
-			tmpPath := tmpFile.Name()
-			if _, writeErr := tmpFile.Write([]byte(newContent)); writeErr != nil {
-				_ = tmpFile.Close()
-				_ = os.Remove(tmpPath)
-				errors = append(errors, fmt.Sprintf("- %s: temp file write error: %s", filePath, writeErr.Error()))
-				continue
-			}
-			_ = tmpFile.Close()
-
-			if valErr := e.validateTypeScript(ctx, tmpPath); valErr != nil {
-				_ = os.Remove(tmpPath)
-				errors = append(errors, fmt.Sprintf("- %s: syntax error after edit: %s", filePath, valErr.Error()))
-				continue
-			}
-			_ = os.Remove(tmpPath)
+		// Sanitize src/custom.css & normalize CSS files for Tailwind v4 compatibility
+		// (skip per-file esbuild subprocess validation — verifyBuild validates the entire project once)
+		if isCustomCSSPath(filePath) {
+			newContent, _ = sanitizeCustomCSS(newContent, e.workspacePath)
+		}
+		if strings.HasSuffix(strings.ToLower(filePath), ".css") {
+			newContent = NormalizeCSSContent(newContent, fullPath, e.workspacePath)
 		}
 
 		edits = append(edits, pendingEdit{

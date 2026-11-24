@@ -130,9 +130,22 @@ func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryC
 	}
 }
 
-// convertMessages converts our Message format to Anthropic format
+// convertMessages converts our Message format to Anthropic format,
+// merging consecutive tool results (and adjacent user messages) into a single
+// user message so Anthropic's alternating user/assistant turn constraint is always honored.
 func (c *Client) convertMessages(messages []models.Message) []anthropic.MessageParam {
 	var contentMsgs []anthropic.MessageParam
+
+	appendToUserMsg := func(block anthropic.ContentBlockParamUnion) {
+		if n := len(contentMsgs); n > 0 && contentMsgs[n-1].Role == anthropic.MessageParamRoleUser {
+			contentMsgs[n-1].Content = append(contentMsgs[n-1].Content, block)
+			return
+		}
+		contentMsgs = append(contentMsgs, anthropic.MessageParam{
+			Role:    anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{block},
+		})
+	}
 
 	for _, msg := range messages {
 		switch msg.Role {
@@ -140,7 +153,7 @@ func (c *Client) convertMessages(messages []models.Message) []anthropic.MessageP
 			// System messages are extracted separately
 			continue
 		case "user":
-			contentMsgs = append(contentMsgs, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
+			appendToUserMsg(anthropic.NewTextBlock(msg.Content))
 		case "assistant":
 			// Check if there are tool calls
 			if len(msg.ToolCalls) > 0 {
@@ -167,18 +180,13 @@ func (c *Client) convertMessages(messages []models.Message) []anthropic.MessageP
 				contentMsgs = append(contentMsgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
 			}
 		case "tool":
-			// Tool result message
-			contentMsgs = append(contentMsgs, anthropic.MessageParam{
-				Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.ContentBlockParamUnion{
-						OfToolResult: &anthropic.ToolResultBlockParam{
-							ToolUseID: msg.ToolCallID,
-							Content: []anthropic.ToolResultBlockParamContentUnion{
-								anthropic.ToolResultBlockParamContentUnion{
-									OfText: &anthropic.TextBlockParam{Text: msg.Content},
-								},
-							},
+			// Merge consecutive tool result messages into a single user message with multiple tool_result blocks
+			appendToUserMsg(anthropic.ContentBlockParamUnion{
+				OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: msg.ToolCallID,
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{
+							OfText: &anthropic.TextBlockParam{Text: msg.Content},
 						},
 					},
 				},
@@ -190,6 +198,7 @@ func (c *Client) convertMessages(messages []models.Message) []anthropic.MessageP
 }
 
 // extractSystemMessages extracts system messages from the message list
+// and attaches ephemeral prompt caching to the last system block when enabled.
 func (c *Client) extractSystemMessages(messages []models.Message) []anthropic.TextBlockParam {
 	var systemContents []anthropic.TextBlockParam
 	for _, msg := range messages {
@@ -197,10 +206,14 @@ func (c *Client) extractSystemMessages(messages []models.Message) []anthropic.Te
 			systemContents = append(systemContents, anthropic.TextBlockParam{Text: msg.Content})
 		}
 	}
+	if c.enableCaching && len(systemContents) > 0 {
+		systemContents[len(systemContents)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
 	return systemContents
 }
 
 // convertTools converts our ToolDefinition to Anthropic format
+// and attaches ephemeral prompt caching to the last tool definition when enabled.
 func (c *Client) convertTools(tools []models.ToolDefinition) []anthropic.ToolUnionParam {
 	anthropicTools := make([]anthropic.ToolUnionParam, len(tools))
 	for i, tool := range tools {
@@ -220,6 +233,9 @@ func (c *Client) convertTools(tools []models.ToolDefinition) []anthropic.ToolUni
 				},
 			},
 		}
+	}
+	if c.enableCaching && len(anthropicTools) > 0 && anthropicTools[len(anthropicTools)-1].OfTool != nil {
+		anthropicTools[len(anthropicTools)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
 	return anthropicTools
 }

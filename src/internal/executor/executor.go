@@ -203,8 +203,9 @@ func (e *Executor) Execute(ctx context.Context, toolName string, args map[string
 		}
 
 		if err == nil {
-			// Track file-modifying and real code-modifying operations (only if successful)
-			if result.Success && IsFileModifying(toolName) {
+			// Track file-modifying and real code-modifying operations (only if successful, or partial writeFiles)
+			didMutate := result.Success || (toolName == "writeFiles" && strings.Contains(result.Content, "File created:"))
+			if didMutate && IsFileModifying(toolName) {
 				isCode := IsCodeModifying(toolName, args)
 				e.fileChangesMu.Lock()
 				e.fileChanges = true
@@ -256,8 +257,8 @@ func (e *Executor) Execute(ctx context.Context, toolName string, args map[string
 
 // executeTool executes a single tool without retry logic
 func (e *Executor) executeTool(ctx context.Context, toolName string, args map[string]interface{}) (*ToolResult, error) {
-	// Ensure dependencies are installed before file writes (enables TypeScript validation)
-	if toolName == "createFile" || toolName == "writeFile" || toolName == "editFile" {
+	// Ensure dependencies are installed before file writes (fast 0ms cached check)
+	if toolName == "createFile" || toolName == "writeFile" || toolName == "writeFiles" || toolName == "editFile" {
 		if err := e.ensureDependenciesInstalled(ctx); err != nil {
 			if e.logger != nil {
 				e.logger.WithField("error", err.Error()).Warn("ensureDependenciesInstalled failed (non-blocking)")
@@ -268,10 +269,14 @@ func (e *Executor) executeTool(ctx context.Context, toolName string, args map[st
 	switch toolName {
 	case "createFile", "writeFile":
 		return e.file.CreateFile(ctx, args)
+	case "writeFiles":
+		return e.file.WriteFiles(ctx, args)
 	case "editFile":
 		return e.file.EditFile(ctx, args)
 	case "readFile":
 		return e.file.ReadFile(ctx, args)
+	case "readFiles":
+		return e.file.ReadFiles(ctx, args)
 	case "listFiles":
 		return e.file.ListFiles(ctx, args)
 	case "searchFiles":
@@ -521,70 +526,105 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []ToolCallRequest)
 		e.mu.RUnlock()
 	}
 
-	// Execute write tools sequentially with exclusive lock
+	// Execute write tools:
+	// Parallelize contiguous runs of independent createFile/editFile calls targeting distinct normalized paths.
+	// Keep sequential locking for same-path writes, writeFiles, deleteFile, verifyBuild, useTemplate, and other state tools.
 	if e.logger != nil {
 		e.logger.WithFields(logrus.Fields{
 			"write_tools_count": len(writeReqs),
 		}).Debug("ExecuteBatch: starting write tools execution")
 	}
 
-	// Detect duplicate file paths among write tools
-	duplicateFiles := detectDuplicateFilePaths(requests)
-	executedPaths := make(map[string]bool)
-
-	for i, ir := range writeReqs {
-		if e.logger != nil {
-			e.logger.WithFields(logrus.Fields{
-				"tool":     ir.req.Name,
-				"index":    i,
-				"of_total": len(writeReqs),
-			}).Debug("ExecuteBatch: acquiring lock for write tool")
+	pathCounts := make(map[string]int, len(writeReqs))
+	for _, ir := range writeReqs {
+		if norm := normalizeBatchWritePath(ir.req); norm != "" {
+			pathCounts[norm]++
 		}
+	}
 
-		// Check if context is cancelled before locking
+	for i := 0; i < len(writeReqs); {
 		select {
 		case <-ctx.Done():
 			if e.logger != nil {
 				e.logger.WithFields(logrus.Fields{
-					"tool": ir.req.Name,
-				}).Debug("ExecuteBatch: context cancelled before lock")
+					"tool": writeReqs[i].req.Name,
+				}).Debug("ExecuteBatch: context cancelled before write execution")
 			}
 			return nil
 		default:
 		}
 
-		// Check for duplicate file paths - skip second+ edits to same file
-		if path, ok := ir.req.Arguments["path"].(string); ok && path != "" {
-			if _, isDupe := duplicateFiles[path]; isDupe {
-				if executedPaths[path] {
-					results[ir.index] = ToolResult{
-						ToolCallID: ir.req.ID,
-						Success:    false,
-						Content:    "WARNING: Another edit to this file was already executed in this batch. The file content has changed. Use batchEditFiles for multiple changes to the same file, or make edits in separate tool calls.",
-					}
-					continue
-				}
-				executedPaths[path] = true
+		// Collect contiguous parallelizable file writes targeting unique normalized paths
+		if isParallelizableSingleFileWrite(writeReqs[i].req) && pathCounts[normalizeBatchWritePath(writeReqs[i].req)] == 1 {
+			groupStart := i
+			for i < len(writeReqs) &&
+				isParallelizableSingleFileWrite(writeReqs[i].req) &&
+				pathCounts[normalizeBatchWritePath(writeReqs[i].req)] == 1 {
+				i++
 			}
+			group := writeReqs[groupStart:i]
+
+			if len(group) > 1 {
+				e.mu.Lock()
+				var wg sync.WaitGroup
+				var resultsMu sync.Mutex
+				for _, ir := range group {
+					wg.Add(1)
+					go func(ir indexedRequest) {
+						defer wg.Done()
+						result, err := e.Execute(ctx, ir.req.Name, ir.req.Arguments)
+						var tr ToolResult
+						if err != nil {
+							tr = ToolResult{
+								ToolCallID: ir.req.ID,
+								Success:    false,
+								Content:    fmt.Sprintf("Error: %s", err.Error()),
+							}
+						} else {
+							result.ToolCallID = ir.req.ID
+							tr = *result
+						}
+						resultsMu.Lock()
+						results[ir.index] = tr
+						resultsMu.Unlock()
+					}(ir)
+				}
+				wg.Wait()
+				e.mu.Unlock()
+				continue
+			}
+
+			// Single item group: run directly under exclusive lock
+			ir := group[0]
+			e.mu.Lock()
+			result, err := e.Execute(ctx, ir.req.Name, ir.req.Arguments)
+			e.mu.Unlock()
+			if err != nil {
+				results[ir.index] = ToolResult{
+					ToolCallID: ir.req.ID,
+					Success:    false,
+					Content:    fmt.Sprintf("Error: %s", err.Error()),
+				}
+			} else {
+				result.ToolCallID = ir.req.ID
+				results[ir.index] = *result
+			}
+			continue
 		}
 
-		// Use exclusive lock for write operations
+		// Sequential execution for same-path writes, writeFiles, deleteFile, verifyBuild, useTemplate, etc.
+		ir := writeReqs[i]
+		i++
+
 		e.mu.Lock()
 		if e.logger != nil {
 			e.logger.WithFields(logrus.Fields{
 				"tool":  ir.req.Name,
-				"index": i,
+				"index": i - 1,
 			}).Debug("ExecuteBatch: lock acquired, calling Execute")
 		}
 
 		result, err := e.Execute(ctx, ir.req.Name, ir.req.Arguments)
-
-		if e.logger != nil {
-			e.logger.WithFields(logrus.Fields{
-				"tool":  ir.req.Name,
-				"index": i,
-			}).Debug("ExecuteBatch: Execute returned, releasing lock")
-		}
 		e.mu.Unlock()
 
 		if err != nil {
@@ -607,28 +647,25 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []ToolCallRequest)
 	return results
 }
 
-// detectDuplicateFilePaths finds write tools that target the same file path in a batch.
-// Returns a map of path → list of indices for paths that appear more than once.
-func detectDuplicateFilePaths(requests []ToolCallRequest) map[string][]int {
-	pathIndices := make(map[string][]int)
-	for i, req := range requests {
-		if IsReadOnly(req.Name) {
-			continue
-		}
-		path, ok := req.Arguments["path"].(string)
-		if !ok || path == "" {
-			continue
-		}
-		pathIndices[path] = append(pathIndices[path], i)
+// isParallelizableSingleFileWrite returns true for single-file createFile/editFile operations
+// that can safely run concurrently when targeting distinct normalized paths.
+func isParallelizableSingleFileWrite(req ToolCallRequest) bool {
+	switch req.Name {
+	case "createFile", "writeFile", "editFile":
+		return normalizeBatchWritePath(req) != ""
+	default:
+		return false
 	}
-	// Only return paths with duplicates
-	dupes := make(map[string][]int)
-	for path, indices := range pathIndices {
-		if len(indices) > 1 {
-			dupes[path] = indices
-		}
+}
+
+// normalizeBatchWritePath extracts and normalizes the target file path for a write tool request.
+func normalizeBatchWritePath(req ToolCallRequest) string {
+	path, ok := req.Arguments["path"].(string)
+	if !ok || strings.TrimSpace(path) == "" {
+		return ""
 	}
-	return dupes
+	cleaned := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	return strings.TrimPrefix(cleaned, "./")
 }
 
 // executeReadOnly executes a read-only tool without locking
@@ -637,6 +674,8 @@ func (e *Executor) executeReadOnly(ctx context.Context, toolName string, args ma
 	switch toolName {
 	case "readFile":
 		return e.file.ReadFile(ctx, args)
+	case "readFiles":
+		return e.file.ReadFiles(ctx, args)
 	case "listFiles":
 		return e.file.ListFiles(ctx, args)
 	case "searchFiles":
