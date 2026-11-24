@@ -132,8 +132,42 @@ func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryC
 
 // convertMessages converts our Message format to Anthropic format,
 // merging consecutive tool results (and adjacent user messages) into a single
+func normalizeAnthropicImageMediaType(mimeType string) string {
+	clean := strings.TrimSpace(strings.ToLower(strings.Split(mimeType, ";")[0]))
+	switch clean {
+	case "image/jpg", "image/jpeg":
+		return "image/jpeg"
+	case "image/png", "image/gif", "image/webp":
+		return clean
+	default:
+		return ""
+	}
+}
+
+func hasUserImages(messages []models.Message) bool {
+	for _, m := range messages {
+		if m.Role == "user" && len(m.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isVisionUnsupportedAnthropicErr(errStr string) bool {
+	lower := strings.ToLower(errStr)
+	return strings.Contains(lower, "does not support image") ||
+		strings.Contains(lower, "images are not supported") ||
+		strings.Contains(lower, "vision") ||
+		strings.Contains(lower, "multimodal") ||
+		(strings.Contains(lower, "image") && (strings.Contains(lower, "unsupported") || strings.Contains(lower, "not supported") || strings.Contains(lower, "invalid block")))
+}
+
 // user message so Anthropic's alternating user/assistant turn constraint is always honored.
 func (c *Client) convertMessages(messages []models.Message) []anthropic.MessageParam {
+	return c.convertMessagesWithVision(messages, true)
+}
+
+func (c *Client) convertMessagesWithVision(messages []models.Message, includeImages bool) []anthropic.MessageParam {
 	var contentMsgs []anthropic.MessageParam
 
 	appendToUserMsg := func(block anthropic.ContentBlockParamUnion) {
@@ -153,7 +187,23 @@ func (c *Client) convertMessages(messages []models.Message) []anthropic.MessageP
 			// System messages are extracted separately
 			continue
 		case "user":
-			appendToUserMsg(anthropic.NewTextBlock(msg.Content))
+			attachedImgCount := 0
+			if includeImages {
+				for _, img := range msg.Images {
+					if img.DataBase64 == "" {
+						continue
+					}
+					mediaType := normalizeAnthropicImageMediaType(img.MimeType)
+					if mediaType == "" {
+						continue
+					}
+					appendToUserMsg(anthropic.NewImageBlockBase64(mediaType, img.DataBase64))
+					attachedImgCount++
+				}
+			}
+			if msg.Content != "" || attachedImgCount == 0 {
+				appendToUserMsg(anthropic.NewTextBlock(msg.Content))
+			}
 		case "assistant":
 			// Check if there are tool calls
 			if len(msg.ToolCalls) > 0 {
@@ -301,6 +351,16 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 	resp, err := models.RetryWithCallback(ctx, modelsRetryConfig, func() (*anthropic.Message, error) {
 		return c.client.Messages.New(ctx, params)
 	}, modelsRetryCallback, c.logger)
+
+	if err != nil && hasUserImages(messages) && isVisionUnsupportedAnthropicErr(err.Error()) {
+		if c.logger != nil {
+			c.logger.WithError(err).Warnf("%s model %s rejected vision image blocks, retrying text-only", c.providerName, c.model)
+		}
+		params.Messages = c.convertMessagesWithVision(messages, false)
+		resp, err = models.RetryWithCallback(ctx, modelsRetryConfig, func() (*anthropic.Message, error) {
+			return c.client.Messages.New(ctx, params)
+		}, modelsRetryCallback, c.logger)
+	}
 
 	duration := time.Since(startTime)
 

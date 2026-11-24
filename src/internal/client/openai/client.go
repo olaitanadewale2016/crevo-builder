@@ -38,6 +38,7 @@ type Client struct {
 	tokenFieldSwapped           bool
 	tokenCapStripped            bool
 	extraContentStripped        bool
+	visionUnsupported           bool
 	resolvedEndpoint            string
 }
 
@@ -55,9 +56,20 @@ type chatRequest struct {
 
 type chatMessage struct {
 	Role       string         `json:"role"`
-	Content    *string        `json:"content,omitempty"`
+	Content    interface{}    `json:"content,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type chatContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *chatImageURL `json:"image_url,omitempty"`
+}
+
+type chatImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type chatToolCall struct {
@@ -284,6 +296,104 @@ func parseToolCallArguments(raw string) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("failed to parse tool arguments: invalid JSON (%q)", raw)
 }
 
+func normalizeOpenAIImageMime(mimeType string) string {
+	clean := strings.TrimSpace(strings.ToLower(strings.Split(mimeType, ";")[0]))
+	switch clean {
+	case "image/jpg", "image/jpeg":
+		return "image/jpeg"
+	case "image/png", "image/webp", "image/gif":
+		return clean
+	default:
+		return ""
+	}
+}
+
+func buildOpenAIUserContentParts(text string, images []models.ImageAttachment) []chatContentPart {
+	parts := make([]chatContentPart, 0, 1+len(images))
+	hasImagePart := false
+	if text != "" {
+		parts = append(parts, chatContentPart{
+			Type: "text",
+			Text: text,
+		})
+	}
+	for _, img := range images {
+		if img.DataBase64 == "" {
+			continue
+		}
+		mime := normalizeOpenAIImageMime(img.MimeType)
+		if mime == "" {
+			continue
+		}
+		hasImagePart = true
+		parts = append(parts, chatContentPart{
+			Type: "image_url",
+			ImageURL: &chatImageURL{
+				URL: fmt.Sprintf("data:%s;base64,%s", mime, img.DataBase64),
+			},
+		})
+	}
+	if !hasImagePart {
+		return nil
+	}
+	return parts
+}
+
+func hasMultipartUserImages(msgs []chatMessage) bool {
+	for _, cm := range msgs {
+		if parts, ok := cm.Content.([]chatContentPart); ok && len(parts) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func downgradeChatMessagesToText(msgs []chatMessage) []chatMessage {
+	out := make([]chatMessage, len(msgs))
+	copy(out, msgs)
+	for i, cm := range out {
+		if parts, ok := cm.Content.([]chatContentPart); ok {
+			var txt strings.Builder
+			for _, p := range parts {
+				if p.Type == "text" && p.Text != "" {
+					if txt.Len() > 0 {
+						txt.WriteString("\n")
+					}
+					txt.WriteString(p.Text)
+				}
+			}
+			s := txt.String()
+			cm.Content = &s
+			out[i] = cm
+		}
+	}
+	return out
+}
+
+func isVisionUnsupportedError(lowerErr string) bool {
+	if strings.Contains(lowerErr, "image_url") ||
+		strings.Contains(lowerErr, "vision") ||
+		strings.Contains(lowerErr, "multimodal") ||
+		strings.Contains(lowerErr, "does not support image") ||
+		strings.Contains(lowerErr, "not support image") ||
+		strings.Contains(lowerErr, "images are not supported") ||
+		strings.Contains(lowerErr, "image input") {
+		return true
+	}
+	if strings.Contains(lowerErr, "image") &&
+		(strings.Contains(lowerErr, "unsupported") || strings.Contains(lowerErr, "not supported") || strings.Contains(lowerErr, "invalid")) {
+		return true
+	}
+	if strings.Contains(lowerErr, "content") &&
+		(strings.Contains(lowerErr, "expected a string") ||
+			strings.Contains(lowerErr, "expected string") ||
+			strings.Contains(lowerErr, "must be a string") ||
+			strings.Contains(lowerErr, "cannot unmarshal array")) {
+		return true
+	}
+	return false
+}
+
 // Chat sends messages and returns response with potential tool calls
 func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []models.ToolDefinition) (*models.Response, error) {
 	// Snapshot session-cached negotiation state so rejected parameters are never re-sent
@@ -293,6 +403,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 	cachedTokenFieldSwapped := c.tokenFieldSwapped
 	cachedTokenCapStripped := c.tokenCapStripped
 	cachedExtraContentStripped := c.extraContentStripped
+	cachedVisionUnsupported := c.visionUnsupported
 	cachedResolvedEndpoint := c.resolvedEndpoint
 	c.negMu.Unlock()
 
@@ -304,7 +415,14 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		cm := chatMessage{
 			Role: msg.Role,
 		}
-		if msg.Content != "" || (msg.Role != "assistant" && len(msg.ToolCalls) == 0) {
+		multipartSet := false
+		if msg.Role == "user" && len(msg.Images) > 0 && !cachedVisionUnsupported {
+			if parts := buildOpenAIUserContentParts(msg.Content, msg.Images); len(parts) > 0 {
+				cm.Content = parts
+				multipartSet = true
+			}
+		}
+		if !multipartSet && (msg.Content != "" || (msg.Role != "assistant" && len(msg.ToolCalls) == 0)) {
 			cCopy := msg.Content
 			cm.Content = &cCopy
 		}
@@ -424,6 +542,7 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 		tokenFieldSwapped := cachedTokenFieldSwapped
 		tokenCapStripped := cachedTokenCapStripped
 		extraContentStripped := cachedExtraContentStripped
+		visionUnsupported := cachedVisionUnsupported
 		v1Retried := v1Fallback != "" && endpoint == v1Fallback
 		activeEndpoint := endpoint
 
@@ -565,8 +684,20 @@ func (c *Client) Chat(ctx context.Context, messages []models.Message, tools []mo
 			if httpResp.StatusCode == 400 || httpResp.StatusCode == 422 {
 				mutated := false
 
-				// 1a. Downgrade reasoning_effort "minimal" -> "low" if upstream rejects "minimal"
-				if reqPayload.ReasoningEffort == "minimal" && !minimalUnsupported {
+				// 0. If upstream explicitly rejected multimodal image_url content, downgrade to plain text immediately
+				//    before touching unrelated params like reasoning_effort on non-vision reasoning models.
+				if !visionUnsupported && hasMultipartUserImages(reqPayload.Messages) && isVisionUnsupportedError(lowerErr) {
+					visionUnsupported = true
+					reqPayload.Messages = downgradeChatMessagesToText(reqPayload.Messages)
+					mutated = true
+					c.negMu.Lock()
+					c.visionUnsupported = true
+					c.negMu.Unlock()
+					if c.logger != nil {
+						c.logger.Warnf("Model %s rejected multimodal image input (%d), retrying text-only", candidateModel, httpResp.StatusCode)
+					}
+				} else if reqPayload.ReasoningEffort == "minimal" && !minimalUnsupported {
+					// 1a. Downgrade reasoning_effort "minimal" -> "low" if upstream rejects "minimal"
 					minimalUnsupported = true
 					reqPayload.ReasoningEffort = "low"
 					mutated = true

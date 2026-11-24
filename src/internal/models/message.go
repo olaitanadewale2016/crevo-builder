@@ -1,12 +1,21 @@
 package models
 
+// ImageAttachment represents a raster image file attached to a user prompt
+type ImageAttachment struct {
+	Filename   string `json:"filename,omitempty"`
+	MimeType   string `json:"mime_type,omitempty"`
+	URL        string `json:"url,omitempty"`
+	DataBase64 string `json:"data_base64,omitempty"`
+}
+
 // Message represents a conversation message
 type Message struct {
-	Role        string     `json:"role"`
-	Content     string     `json:"content"`
-	ToolCalls   []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID  string     `json:"tool_call_id,omitempty"`
-	ImageBase64 string     `json:"image_base64,omitempty"`
+	Role        string            `json:"role"`
+	Content     string            `json:"content"`
+	ToolCalls   []ToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID  string            `json:"tool_call_id,omitempty"`
+	Images      []ImageAttachment `json:"images,omitempty"`
+	ImageBase64 string            `json:"image_base64,omitempty"`
 }
 
 // ToolCall represents an AI tool call (simplified)

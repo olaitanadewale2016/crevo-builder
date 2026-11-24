@@ -292,7 +292,7 @@ func (s *Server) handleRun(c *gin.Context) {
 	s.mu.Unlock()
 
 	// Start agent in background
-	go s.runAgent(ctx, session, req.Goal, req.History, req.IsCompacted, req.MaxIterations)
+	go s.runAgent(ctx, session, req.Goal, req.History, req.IsCompacted, req.MaxIterations, req.AttachedImages)
 
 	// Log session creation
 	logMsg := "Agent session created"
@@ -1135,7 +1135,7 @@ func (s *Server) handleChat(c *gin.Context) {
 	}
 
 	// Start agent in background with the new message
-	go s.runAgent(ctx, session, req.Message, history, req.IsCompacted, 20)
+	go s.runAgent(ctx, session, req.Message, history, req.IsCompacted, 20, req.AttachedImages)
 
 	c.JSON(http.StatusOK, gin.H{
 		"session_id": sessionID,
@@ -1296,7 +1296,7 @@ func (s *Server) initializeWorkspaceFromTemplate(workspacePath, templateID, lara
 }
 
 // runAgent runs the agent loop
-func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal string, history []models.HistoryMessage, isCompacted bool, maxIterations int) {
+func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal string, history []models.HistoryMessage, isCompacted bool, maxIterations int, attachedImages []models.ImageAttachment) {
 	// Get Laravel URL for template fetching
 	laravelURL := session.GetLaravelURL()
 	selectedTemplate := session.GetSelectedTemplate()
@@ -1364,7 +1364,7 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 	// Update goal to inform AI about workspace / template selection state
 	initialGoal := goal
 	if hadFilesBeforeRun {
-		if !strings.Contains(goal, "[Follow-Up Edit Mode]") {
+		if !strings.Contains(goal, "[Follow-Up Edit Mode") {
 			initialGoal = fmt.Sprintf("%s\n\n(Note: This workspace ALREADY contains an existing website. Do NOT call fetchTemplates or useTemplate. Use readFiles on ONLY the specific files you need to edit, preserve the existing app, brand, and design system, and apply targeted editFile changes unless the user explicitly asks to start over or rebuild from scratch.)", goal)
 		}
 	} else if selectedTemplate != "" {
@@ -1414,7 +1414,7 @@ func (s *Server) runAgent(ctx context.Context, session *agent.Session, goal stri
 	}()
 
 	// Run the agent
-	if err := runner.Run(ctx, session, initialGoal, runnerHistory, maxIterations); err != nil {
+	if err := runner.RunWithImages(ctx, session, initialGoal, runnerHistory, maxIterations, attachedImages); err != nil {
 		// Error handling is done inside Run
 		return
 	}

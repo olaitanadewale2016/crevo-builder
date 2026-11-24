@@ -646,7 +646,7 @@ var goalStopWords = map[string]bool{
 func extractGoalKeywords(goal string) string {
 	clean := goal
 	// Strip system-appended notes or follow-up wrappers
-	for _, marker := range []string{"\n\n(Note:", "[Follow-Up Edit Mode]", "[Attached Images]"} {
+	for _, marker := range []string{"\n\n(Note:", "[Follow-Up Edit Mode", "[Attached Images", "[Attached Files"} {
 		if idx := strings.Index(clean, marker); idx != -1 {
 			clean = clean[:idx]
 		}

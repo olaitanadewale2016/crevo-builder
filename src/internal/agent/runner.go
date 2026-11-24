@@ -2,9 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,8 +267,91 @@ func getToolRecoveryGuidance(toolName string) string {
 	}
 }
 
+func normalizeRasterImageMime(mimeType string) string {
+	clean := strings.TrimSpace(strings.ToLower(strings.Split(mimeType, ";")[0]))
+	switch clean {
+	case "image/jpg":
+		return "image/jpeg"
+	case "image/jpeg", "image/png", "image/webp", "image/gif":
+		return clean
+	default:
+		return ""
+	}
+}
+
+func isPublicRemoteHTTPURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".local") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+		return false
+	}
+	return true
+}
+
+func prepareImageAttachments(ctx context.Context, raw []models.ImageAttachment, logger *logrus.Logger) []models.ImageAttachment {
+	if len(raw) == 0 {
+		return nil
+	}
+	const maxImages = 6
+	const maxBytes = 4 * 1024 * 1024
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+
+	result := make([]models.ImageAttachment, 0, len(raw))
+	for _, img := range raw {
+		if len(result) >= maxImages {
+			break
+		}
+		mime := normalizeRasterImageMime(img.MimeType)
+		if mime == "" {
+			continue
+		}
+		dataB64 := strings.TrimSpace(img.DataBase64)
+		if dataB64 == "" && isPublicRemoteHTTPURL(img.URL) {
+			reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodGet, img.URL, nil)
+			if reqErr == nil {
+				req.Header.Set("User-Agent", models.HTTPUserAgent)
+				resp, doErr := httpClient.Do(req)
+				if doErr == nil {
+					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+						if readErr == nil && len(body) > 0 && len(body) <= maxBytes {
+							dataB64 = base64.StdEncoding.EncodeToString(body)
+						}
+					}
+					resp.Body.Close()
+				} else if logger != nil {
+					logger.WithError(doErr).Debugf("Failed to download attached image URL %s", img.URL)
+				}
+			}
+			cancel()
+		}
+		if dataB64 == "" {
+			continue
+		}
+		result = append(result, models.ImageAttachment{
+			Filename:   img.Filename,
+			MimeType:   mime,
+			URL:        img.URL,
+			DataBase64: dataB64,
+		})
+	}
+	return result
+}
+
 // Run executes the agent loop for a session
 func (r *Runner) Run(ctx context.Context, session *Session, goal string, historyInput HistoryInput, maxIterations int) error {
+	return r.RunWithImages(ctx, session, goal, historyInput, maxIterations, nil)
+}
+
+// RunWithImages executes the agent loop for a session with optional attached raster images
+func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal string, historyInput HistoryInput, maxIterations int, attachedImages []models.ImageAttachment) error {
 	// Create cancellable context
 	ctx, cancel := context.WithCancel(ctx)
 	session.SetCancel(cancel)
@@ -523,10 +611,14 @@ func (r *Runner) Run(ctx context.Context, session *Session, goal string, history
 		})
 	}
 
+	// Prepare attached raster images for multimodal vision (skips SVG or oversized payloads)
+	visionImages := prepareImageAttachments(ctx, attachedImages, r.logger)
+
 	// Add current user message
 	messages = append(messages, models.Message{
 		Role:    "user",
 		Content: goal,
+		Images:  visionImages,
 	})
 
 	sessionCaps := session.GetProjectCapabilities()

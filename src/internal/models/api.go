@@ -97,6 +97,7 @@ type RunRequest struct {
 	ProjectCapabilities *ProjectCapabilities `json:"project_capabilities,omitempty"` // Project feature availability
 	ThemePreset         *ThemePreset         `json:"theme_preset,omitempty"`         // Theme preset from user selection
 	CustomPrompts       *CustomPrompts       `json:"custom_prompts,omitempty"`       // Admin-editable system prompts
+	AttachedImages      []ImageAttachment    `json:"attached_images,omitempty"`      // Optional multimodal raster image attachments
 }
 
 // HistoryMessage represents a message in conversation history
@@ -170,10 +171,11 @@ type SuggestionsResponse struct {
 
 // ChatRequest is the request body for POST /api/chat/:session_id
 type ChatRequest struct {
-	Message     string           `json:"message" binding:"required"`
-	History     []HistoryMessage `json:"history"`
-	IsCompacted bool             `json:"is_compacted"` // Skip summarization if history is already compacted
-	Config      *RequestConfig   `json:"config,omitempty"`
+	Message        string            `json:"message" binding:"required"`
+	History        []HistoryMessage  `json:"history"`
+	IsCompacted    bool              `json:"is_compacted"` // Skip summarization if history is already compacted
+	Config         *RequestConfig    `json:"config,omitempty"`
+	AttachedImages []ImageAttachment `json:"attached_images,omitempty"`
 }
 
 // ErrorResponse is returned for errors
