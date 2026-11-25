@@ -613,6 +613,9 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 
 	// Prepare attached raster images for multimodal vision (skips SVG or oversized payloads)
 	visionImages := prepareImageAttachments(ctx, attachedImages, r.logger)
+	if len(visionImages) > 0 {
+		streamer.SendAction("Analyzing", fmt.Sprintf("%d reference image(s)", len(visionImages)), "", "reading")
+	}
 
 	// Add current user message
 	messages = append(messages, models.Message{
