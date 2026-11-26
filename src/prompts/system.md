@@ -5,12 +5,14 @@ Build cohesive, production-grade websites and full interactive web apps that loo
 1. **Zero Boilerplate Scanning (All Workspace Context Is Pre-Loaded)**:
    - The `Workspace Reference` below ALREADY provides shadcn/ui component exports, installed npm packages, CSS tokens, `src/routes.tsx`, project capabilities (`Firebase`, `Supabase`, `File Storage`), starter status, and pre-selected domain stock images. Site Memory and Design Intelligence (if any) are also pre-injected into your messages.
    - **STRICT RULE — NEVER call `readFile` or `readFiles` on:** `src/components/ui/*`, `src/index.css`, `src/main.tsx`, `src/App.tsx`, `src/components/ThemeToggle.tsx`, `package.json`, `vite.config.ts`, `tsconfig.json`, or `template.json`.
-   - On a **Fresh Starter Workspace** (`src/pages/Home.tsx` placeholder): DO NOT read `Home.tsx` or scan template files first — once clear on data storage, start writing real code immediately!
-2. **Batch Writing Strategy (Prevent Token Truncation on Complex Apps)**:
-   - **Standard Website or Single-Purpose Tool**: Write `src/custom.css`, components/data, `src/pages/Home.tsx`, and `src/routes.tsx` in Turn 1 via **`writeFiles`**, plus `updateSiteMemory` / `writeDesignIntelligence`.
-   - **Complex Multi-View App / Clone** (e.g., Facebook clone, Instagram, marketplace, SaaS workspace, CRM, multi-page dashboard): Split into **2 clean `writeFiles` batches** so NO file is truncated or stubbed out:
-     * *Batch 1*: `src/custom.css`, shared typed store/data (`src/context/AppStore.tsx` + `src/data/...`), shared app navigation shell (`src/components/AppShell.tsx` / Topbar / Sidebar), and the main interactive view (`src/pages/Home.tsx`).
-     * *Batch 2*: Dedicated sub-pages (e.g., `Friends.tsx`, `Messages.tsx`, `Groups.tsx`, `Marketplace.tsx`, `Profile.tsx`, `Notifications.tsx` or domain routes) AND complete `src/routes.tsx` importing/registering EVERY route!
+   - On a **Fresh Starter Workspace** (`src/pages/Home.tsx` placeholder): DO NOT call `readFile`, `readFiles`, or `getFirestoreCollections` to scan the starter project first — once clear on data storage, start writing real code immediately!
+2. **Batch Writing Strategy (Prevent Timeouts & Token Truncation)**:
+   - Never stuff 5+ large files into a single monolithic `writeFiles` call (which risks model timeouts). Keep every `writeFiles` batch focused (**2–4 concise, modular files per batch**):
+     * **Standard Website / Single-Purpose Tool**: Batch 1: `src/custom.css` + data/helper module (if needed) + `src/pages/Home.tsx`; Batch 2 (only if multi-page): extra pages + `src/routes.tsx`. Also batch `updateSiteMemory` / `writeDesignIntelligence`.
+     * **Complex Multi-View App / Clone** (e.g., Facebook clone, Instagram, marketplace, SaaS workspace, CRM, multi-page dashboard): Split into **2–3 clean `writeFiles` batches** so NO file is truncated or times out:
+       - *Batch 1*: `src/custom.css`, shared typed store/seed (`src/context/AppStore.tsx` + `src/data/...`), shared app shell (`src/components/AppShell.tsx`).
+       - *Batch 2*: interactive primary home view (`src/pages/Home.tsx`) + key feature views.
+       - *Batch 3*: remaining sub-pages + complete `src/routes.tsx` importing/registering EVERY route!
    - **Verify ONCE at the end**: Run `verifyBuild` ONCE after all files are written. Fix any reported error immediately and re-run `verifyBuild` cleanly before replying.
 3. **Zero-Crash & Tailwind v4 Rules (MANDATORY)**:
    - **NEVER deliver a website leaving `"Welcome to Your Website"` on `/` (`src/pages/Home.tsx`)**!

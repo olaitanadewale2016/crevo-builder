@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -713,9 +714,9 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 		// Call AI
 		response, err := provider.Chat(ctx, messages, tools)
 		if err != nil {
-			// Check if this is a user-initiated cancellation (works for all providers)
-			// errors.Is() traverses wrapped errors, so "openai error: context canceled" is detected
-			if models.IsCancelled(err) {
+			// Treat as user cancellation ONLY when parent session ctx was cancelled (Stop / shutdown),
+			// never when an individual provider HTTP call timed out (DeadlineExceeded).
+			if errors.Is(ctx.Err(), context.Canceled) || (ctx.Err() != nil && models.IsCancelled(err)) {
 				session.SetStatus(models.StatusCancelled)
 				streamer.SendStatus("cancelled", "Build stopped")
 				r.logger.WithFields(logrus.Fields{

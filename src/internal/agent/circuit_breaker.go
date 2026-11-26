@@ -90,6 +90,12 @@ func getModelTier(providerType, model string) string {
 		return "standard"
 	}
 	modelLower := strings.ToLower(model)
+	// Match DeepSeek, free-tier (:free), or flash-lite models regardless of adapter type (e.g. Anthropic proxy)
+	if strings.Contains(modelLower, "deepseek") ||
+		strings.Contains(modelLower, ":free") ||
+		strings.Contains(modelLower, "flash-lite") {
+		return "standard"
+	}
 	// Use word-boundary check: "mini"/"nano" must be preceded by a delimiter (-, _, or start)
 	// to avoid false positives like "gemini"
 	for _, suffix := range []string{"mini", "nano"} {

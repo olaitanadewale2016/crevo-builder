@@ -42,15 +42,20 @@ func ClassifyError(err error) ErrorCategory {
 		return ErrorCategoryFatal
 	}
 
-	// Check for context cancellation first
+	errStr := strings.ToLower(err.Error())
+
+	// Check for timeout errors FIRST — per-request HTTP deadlines must retry rather than look like user cancel
+	if errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "timed out") {
+		return ErrorCategoryRetryable
+	}
+
+	// Check for explicit context cancellation (user clicked Stop / shutdown)
 	if errors.Is(err, context.Canceled) {
 		return ErrorCategoryCancelled
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrorCategoryCancelled
-	}
-
-	errStr := strings.ToLower(err.Error())
 
 	// Check for rate limiting (429)
 	if strings.Contains(errStr, "429") ||

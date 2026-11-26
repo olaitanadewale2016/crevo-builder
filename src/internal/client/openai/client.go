@@ -134,7 +134,7 @@ func NewClientWithRetry(cfg models.ProviderConfig, logger *logrus.Logger, retryC
 	baseURL = strings.TrimRight(baseURL, "/")
 
 	httpClient := &http.Client{
-		Timeout: 120 * time.Second,
+		Timeout: 300 * time.Second,
 	}
 
 	openaiConfig := openai.DefaultConfig(cfg.APIKey)

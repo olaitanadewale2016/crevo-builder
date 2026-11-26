@@ -44,18 +44,17 @@ func ClassifyError(err error) ErrorCategory {
 
 	errStr := strings.ToLower(err.Error())
 
-	// Check for timeout errors FIRST (before context cancellation check)
-	// Tool timeouts should be retryable
-	if strings.Contains(errStr, "timeout") ||
+	// Check for timeout errors FIRST (before cancellation check)
+	// Per-request HTTP / tool timeouts (DeadlineExceeded) are retryable, NOT user cancellations.
+	if errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "timeout") ||
 		strings.Contains(errStr, "timed out") {
 		return ErrorCategoryRetryable
 	}
 
-	// Check for context cancellation (but not timeout - handled above)
+	// Check for explicit context cancellation (user clicked Stop / shutdown)
 	if errors.Is(err, context.Canceled) {
-		return ErrorCategoryCancelled
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrorCategoryCancelled
 	}
 
