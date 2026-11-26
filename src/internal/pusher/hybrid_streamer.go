@@ -95,9 +95,10 @@ func (h *HybridStreamer) SendRetry(attempt, maxRetries int, delayMs int64, reaso
 	h.pusher.SendRetry(attempt, maxRetries, delayMs, reason)
 }
 
-// SendTokenUsage sends to Pusher for low-latency streaming
+// SendTokenUsage sends to BOTH Pusher (live UI) AND webhook (real-time credit deduction)
 func (h *HybridStreamer) SendTokenUsage(prompt, completion, total, context int) {
 	h.pusher.SendTokenUsage(prompt, completion, total, context)
+	h.webhook.SendTokenUsage(prompt, completion, total, context)
 }
 
 // SendToolTimeout sends to Pusher for low-latency streaming

@@ -518,6 +518,8 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 				// Track summarization tokens for credit depletion
 				if state.TotalTokens > 0 {
 					session.UpdateTokens(state.PromptTokens, state.CompletionTokens, state.TotalTokens)
+					promptTok, compTok, totalTok, ctxTok := session.GetTokenStats()
+					streamer.SendTokenUsage(promptTok, compTok, totalTok, ctxTok)
 					r.logger.WithFields(logrus.Fields{
 						"session_id":            session.ID,
 						"summarizer_prompt":     state.PromptTokens,
@@ -791,8 +793,8 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 
 		session.UpdateTokens(response.PromptTokens, response.CompletionTokens, response.TokensUsed)
 
-		// Send token_usage event if granular events enabled
-		if features.GranularEvents {
+		// Always emit token_usage after every AI turn for real-time credit deduction & UI updates
+		if response.TokensUsed > 0 || features.GranularEvents {
 			prompt, completion, total, context := session.GetTokenStats()
 			streamer.SendTokenUsage(prompt, completion, total, context)
 		}
@@ -805,7 +807,7 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 				UsedTokens:       runTotal, // Per-run tokens
 				RemainingCredits: session.GetRemainingCredits() - runTotal,
 				PercentUsed:      percentUsed,
-				Message:          "You have used 80% of your build credits for this session. The session will complete the current task and then stop.",
+				Message:          "You have used 80% of your remaining build credits. Buy or upgrade credits in Billing & Plans if needed.",
 			}
 			streamer.SendCreditWarning(creditData)
 			r.logger.WithFields(logrus.Fields{
@@ -816,15 +818,16 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 			}).Warn("Credit warning threshold reached")
 		}
 
-		// Check if credits exceeded - graceful exit
+		// Check if credits exceeded midway - stop immediately (no credit refund) and prompt user how to buy more
 		percentUsed, exceeded := session.CheckCredits()
 		if exceeded {
 			_, _, runTotal := session.GetRunTokenStats()
+			creditMsg := "Build credits exhausted mid-generation (consumed credits are non-refundable). Upgrade your plan or purchase more credits in Plans & Billing (/billing/plans), or connect your own AI API key in Profile Settings (/profile)."
 			creditData := models.CreditEventData{
 				UsedTokens:       runTotal, // Per-run tokens
 				RemainingCredits: 0,
 				PercentUsed:      percentUsed,
-				Message:          "Build credit limit reached. Session is stopping gracefully.",
+				Message:          creditMsg,
 			}
 			streamer.SendCreditExceeded(creditData)
 			streamer.SendStatus("credit_limit", "Build credit limit reached")
@@ -835,21 +838,29 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 				"limit":             session.GetRemainingCredits(),
 			}).Warn("Credit limit exceeded, stopping session")
 
-			// Only mark files changed / completed if the root app was actually customized beyond starter template
+			// Preserve partial workspace output if home page was customized before exhaustion
 			hasChanges := r.executor != nil && r.executor.HasCodeChanges() && executor.WorkspaceHasCustomizedApp(r.executor.GetWorkspacePath())
 			session.SetFilesChanged(hasChanges)
 			if hasChanges {
+				if r.executor != nil && !executor.IsDistUpToDate(r.executor.GetWorkspacePath()) {
+					if bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil); bErr == nil && bResult != nil {
+						session.SetBuildResult(bResult.Success, bResult.Content)
+					}
+				}
 				session.SetStatus(models.StatusCompleted)
 			} else {
 				session.SetStatus(models.StatusFailed)
+				session.SetBuildResult(false, "Build credit limit reached")
 			}
+			exhaustedMsg := "Your build credits ran out midway during generation, so the build was stopped (credits already consumed during generation are non-refundable).\n\n**How to continue building:**\n1. Open **Billing & Plans** (`/billing/plans`) to upgrade your plan or purchase more monthly build credits.\n2. Or connect your own AI API key in **Profile Settings** (`/profile`) to build without consuming platform credits."
+			streamer.SendMessage(exhaustedMsg)
 			completeData := models.CompleteData{
 				Iterations:       iterationsRun,
 				TokensUsed:       session.TokensUsed,
 				FilesChanged:     hasChanges,
-				Message:          "Build credit limit reached. Please upgrade your plan or wait for credits to reset.",
+				Message:          exhaustedMsg,
 				BuildStatus:      session.GetBuildStatus(),
-				BuildMessage:     session.GetBuildMessage(),
+				BuildMessage:     "Build credit limit reached",
 				BuildRequired:    session.IsBuildRequired(),
 				PromptTokens:     session.PromptTokens,
 				CompletionTokens: session.CompletionTokens,
@@ -1457,6 +1468,8 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 					// Track auto-compaction tokens for credit depletion
 					if state.TotalTokens > 0 {
 						session.UpdateTokens(state.PromptTokens, state.CompletionTokens, state.TotalTokens)
+						promptTok, compTok, totalTok, ctxTok := session.GetTokenStats()
+						streamer.SendTokenUsage(promptTok, compTok, totalTok, ctxTok)
 						r.logger.WithFields(logrus.Fields{
 							"session_id":            session.ID,
 							"summarizer_prompt":     state.PromptTokens,
