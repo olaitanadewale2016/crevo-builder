@@ -71,13 +71,20 @@ func randomPhrase(phrases []string) string {
 
 // formatProjectCapabilities formats project capabilities as JSON for tool result
 func formatProjectCapabilities(caps *models.ProjectCapabilities) string {
-	var firebase, storage string
+	var firebase, supabase, storage string
 
 	if caps.Firebase != nil {
-		firebase = fmt.Sprintf(`"firebase":{"enabled":%t,"collection_prefix":"%s"}`,
-			caps.Firebase.Enabled, caps.Firebase.CollectionPrefix)
+		firebase = fmt.Sprintf(`"firebase":{"enabled":%t,"available":%t,"collection_prefix":"%s"}`,
+			caps.Firebase.Enabled, caps.Firebase.Available, caps.Firebase.CollectionPrefix)
 	} else {
-		firebase = `"firebase":{"enabled":false,"collection_prefix":""}`
+		firebase = `"firebase":{"enabled":false,"available":false,"collection_prefix":""}`
+	}
+
+	if caps.Supabase != nil {
+		supabase = fmt.Sprintf(`"supabase":{"enabled":%t,"available":%t,"url":"%s","table_prefix":"%s"}`,
+			caps.Supabase.Enabled, caps.Supabase.Available, caps.Supabase.URL, caps.Supabase.TablePrefix)
+	} else {
+		supabase = `"supabase":{"enabled":false,"available":false,"url":"","table_prefix":""}`
 	}
 
 	if caps.Storage != nil {
@@ -87,7 +94,7 @@ func formatProjectCapabilities(caps *models.ProjectCapabilities) string {
 		storage = `"storage":{"enabled":false,"max_file_size_mb":0}`
 	}
 
-	return fmt.Sprintf("{%s,%s}", firebase, storage)
+	return fmt.Sprintf("{%s,%s,%s}", firebase, supabase, storage)
 }
 
 // handleGetFirestoreCollections fetches Firestore collections from Laravel
@@ -647,10 +654,26 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 	const maxBuildFixes = 3
 	var lastBuildError string
 
+	// Check whether prior conversation already contains an assistant clarification or greeting
+	hasPriorAssistantTurn := false
+	for _, h := range history {
+		if h.Role == "assistant" {
+			t := strings.TrimSpace(h.Content)
+			if t != "" &&
+				!strings.HasPrefix(t, "Build cancelled") &&
+				!strings.HasPrefix(t, "Build failed") &&
+				!strings.HasPrefix(t, "AI provider error") {
+				hasPriorAssistantTurn = true
+				break
+			}
+		}
+	}
+
 	// Empty response / no-code nudges & excessive scan steering
 	emptyResponseNudged := false
 	noCodeNudges := 0
 	consecutiveReadOnlyTurns := 0
+	clarifyingReplyAccepted := false
 
 	// Set model-appropriate circuit breaker thresholds
 	session.SetCircuitBreakerForModel(r.aiConfig.ProviderType, r.aiConfig.Model)
@@ -867,8 +890,17 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 		// Check if done (no tool calls)
 		if len(response.ToolCalls) == 0 {
 			// Ensure actual customized code exists on '/' before allowing completion on a starter workspace
+			// (unless this is a legitimate clarifying/storage-choice question or casual conversational reply)
 			hasCodeChanges := r.executor != nil && r.executor.HasCodeChanges()
 			isUneditedStarter := !executor.WorkspaceHasCustomizedApp(r.executor.GetWorkspacePath())
+			if !hasCodeChanges && isUneditedStarter && isLegitimateClarifyingOrChatReply(goal, response.Content, hasPriorAssistantTurn) {
+				clarifyingReplyAccepted = true
+				r.logger.WithFields(logrus.Fields{
+					"session_id": session.ID,
+					"iteration":  iterationsRun,
+				}).Info("Accepting legitimate clarifying/conversational reply without starter build error")
+				break
+			}
 			if (!hasCodeChanges || isUneditedStarter) && noCodeNudges < 2 && (isUneditedStarter || iterationsRun <= 4) {
 				noCodeNudges++
 				r.logger.WithFields(logrus.Fields{
@@ -878,7 +910,7 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 					"unedited_starts": isUneditedStarter,
 				}).Warn("AI returned no tool calls before customizing root homepage, nudging to build website code")
 
-				nudgeMsg := "STOP: You have NOT created or edited any website source files yet (such as src/custom.css or src/pages/Home.tsx). Reading files or saving site memory alone does NOT complete the build! Use createFile/editFile to write the complete website styling and components/pages, then run verifyBuild before giving your final response."
+				nudgeMsg := "STOP: You have NOT created or edited any website source files yet (such as src/custom.css or src/pages/Home.tsx). Reading files or saving site memory alone does NOT complete the build! Use writeFiles/createFile to write the complete app styling, components, and pages, then run verifyBuild before giving your final response."
 				if hasCodeChanges && isUneditedStarter {
 					nudgeMsg = "STOP: Your root homepage ('/') still renders the starter template placeholder ('Welcome to Your Website'). You MUST update src/pages/Home.tsx (or update the '/' route in src/routes.tsx) with the complete customized homepage requested by the user, then run verifyBuild before finishing."
 				}
@@ -905,9 +937,9 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 				continue
 			}
 
-			// Before completing, scan src/pages/ for unregistered pages
-			// Skip if we've already sent final notification about unresolved issues
-			if !integrationFinalNotified && integrationFixAttempts < maxIntegrationFixes {
+			// Before completing, scan src/pages/ for unregistered pages and verify interactive links/routes
+			// Skip on unedited starter workspaces or if we've already sent final notification about unresolved issues
+			if (!isUneditedStarter || hasCodeChanges) && !integrationFinalNotified && integrationFixAttempts < maxIntegrationFixes {
 				pageFiles := scanPageFiles(r.executor.GetWorkspacePath())
 				if len(pageFiles) > 0 {
 					streamer.SendStatus("verifying", "Checking page integration...")
@@ -968,7 +1000,7 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 						}).Info("Integration issues found, re-entering loop to fix")
 
 						fixPrompt := fmt.Sprintf(
-							"⚠️ INTEGRATION ISSUES DETECTED:\n\n%s\n\nYou MUST fix these integration issues before completing the task. Edit src/routes.tsx to import and register all pages. Do NOT tell the user the task is complete until all pages are routed.",
+							"⚠️ INTEGRATION & NAVIGATION ISSUES DETECTED:\n\n%s\n\nFix EVERY issue before finishing: wire missing pages/routes in src/routes.tsx, replace any leading-slash `<a href=\"/...\">` with `<Link to=\"...\">` or `#section` scroll, replace any dead `href=\"#\"` / empty `onClick={() => {}}` handlers with real working behavior, and ensure all builds compile cleanly.",
 							verifyResult.Content,
 						)
 						messages = append(messages, models.Message{
@@ -1563,7 +1595,9 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 	session.SetFilesChanged(effectiveCodeChanges)
 
 	// Only compile & show "Website Build Complete!" when actual customized website code exists on '/'.
-	// If the workspace still renders the untouched starter template ("Welcome to Your Website"),
+	// If the agent asked a legitimate clarifying question (e.g. Firebase vs Supabase vs localStorage),
+	// complete cleanly with BuildStatus="skipped" and preserve its message intact.
+	// If the workspace still renders the untouched starter template without a valid chat/clarification reply,
 	// mark the run failed rather than pretending or deploying a starter template preview.
 	if effectiveCodeChanges {
 		bResult, bErr := r.executor.Execute(ctx, "verifyBuild", nil)
@@ -1572,6 +1606,25 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 		}
 		lastAIContent = r.synthesizeBuildSummary(session.GetWorkspacePath(), session, lastAIContent)
 		streamer.SendMessage(lastAIContent)
+	} else if clarifyingReplyAccepted && strings.TrimSpace(lastAIContent) != "" {
+		session.SetStatus(models.StatusCompleted)
+		session.SetBuildResult(true, "Clarification requested")
+		lastAIContent = strings.TrimSpace(lastAIContent)
+		streamer.SendMessage(lastAIContent)
+		streamer.SendComplete(models.CompleteData{
+			Iterations:       session.Iterations,
+			TokensUsed:       session.TokensUsed,
+			FilesChanged:     false,
+			BuildStatus:      "skipped",
+			BuildMessage:     "Clarification requested",
+			BuildRequired:    false,
+			Message:          lastAIContent,
+			PromptTokens:     session.PromptTokens,
+			CompletionTokens: session.CompletionTokens,
+			Model:            r.aiConfig.Model,
+		})
+		logging.LogSessionEnd(r.logger, session.ID, session.Iterations, session.TokensUsed, false, string(models.StatusCompleted))
+		return nil
 	} else if !isCustomizedApp {
 		session.SetStatus(models.StatusFailed)
 		failMsg := "The AI did not generate a customized home page (the starter template was not updated). Please resend your prompt or try a different AI model."
@@ -1650,9 +1703,11 @@ func (r *Runner) synthesizeBuildSummary(workspacePath string, session *Session, 
 
 	// Detect key components and sections from Home.tsx and custom.css
 	var features []string
+	var stylingNotes []string
 	homePath := filepath.Join(workspacePath, "src", "pages", "Home.tsx")
 	if homeBytes, err := os.ReadFile(homePath); err == nil {
 		homeStr := string(homeBytes)
+		hasFooter := strings.Contains(strings.ToLower(homeStr), "<footer") || strings.Contains(homeStr, "Footer")
 		if strings.Contains(homeStr, "Hero") || strings.Contains(homeStr, "hero") {
 			features = append(features, "Hero section with high-impact headline and primary call-to-action")
 		}
@@ -1666,18 +1721,24 @@ func (r *Runner) synthesizeBuildSummary(workspacePath string, session *Session, 
 			features = append(features, "Customer testimonials and trust badges")
 		}
 		if strings.Contains(homeStr, "Contact") || strings.Contains(homeStr, "form") || strings.Contains(homeStr, "input") {
-			features = append(features, "Contact & inquiry form with interactive inputs")
+			features = append(features, "Interactive forms and controls with live feedback")
 		}
 		if strings.Contains(homeStr, "FAQ") || strings.Contains(homeStr, "accordion") {
 			features = append(features, "Accordion FAQ section for common questions")
 		}
+		if hasFooter {
+			stylingNotes = append(stylingNotes, "Sticky header navigation with logo, nav links, and footer")
+		} else {
+			stylingNotes = append(stylingNotes, "Responsive navigation bar and interactive workspace layout")
+		}
+	} else {
+		stylingNotes = append(stylingNotes, "Responsive navigation and modular page layout")
 	}
 	if len(features) == 0 {
-		features = append(features, "Responsive layout tailored to your business goals", "Modern UI components with smooth interactive hover effects")
+		features = append(features, "Responsive layout tailored to your goals", "Interactive components with smooth hover and active states")
 	}
 
 	// Check custom.css for styling highlights
-	var stylingNotes []string
 	cssPath := filepath.Join(workspacePath, "src", "custom.css")
 	if _, err := os.Stat(cssPath); err == nil {
 		stylingNotes = append(stylingNotes, "Cohesive color palette and typography configured in `src/custom.css`")
@@ -1685,7 +1746,6 @@ func (r *Runner) synthesizeBuildSummary(workspacePath string, session *Session, 
 		stylingNotes = append(stylingNotes, "Clean Tailwind styling with harmonious contrast and fluid spacing")
 	}
 	stylingNotes = append(stylingNotes, "Mobile-first responsive design adapted for desktop, tablet, and mobile screens")
-	stylingNotes = append(stylingNotes, "Sticky header navigation with logo, nav links, and multi-column footer")
 
 	var b strings.Builder
 	b.WriteString("### 🎉 Website Build Complete!\n\n")
@@ -1896,4 +1956,80 @@ func isReadingUIPrimitive(tc models.ToolCall) bool {
 		}
 	}
 	return false
+}
+
+// isExplicitBuildProceedGoal checks whether the user explicitly told the AI to build/proceed
+// (e.g. answering a storage choice or saying "continue" / "use localStorage" / "use firebase").
+func isExplicitBuildProceedGoal(goal string) bool {
+	lower := strings.ToLower(strings.TrimSpace(goal))
+	if lower == "continue" || lower == "proceed" || lower == "go ahead" || lower == "build it" || lower == "start" {
+		return true
+	}
+	proceedSignals := []string{
+		"use firebase", "with firebase", "firebase only",
+		"use supabase", "with supabase", "supabase only",
+		"use localstorage", "use local storage", "with localstorage", "with local storage",
+		"localstorage", "local storage", "demo version", "client-side only", "frontend only",
+		"just build", "go ahead and build", "build it now", "build without backend",
+	}
+	for _, sig := range proceedSignals {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCasualConversationalGoal checks if the user's message is a simple greeting, thanks, or praise.
+func isCasualConversationalGoal(goal string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(goal))
+	if idx := strings.Index(trimmed, "\n["); idx != -1 {
+		trimmed = strings.TrimSpace(trimmed[:idx])
+	}
+	trimmed = strings.Trim(trimmed, "!.?, ")
+	casual := map[string]bool{
+		"hi": true, "hello": true, "hey": true, "good morning": true, "good afternoon": true,
+		"good evening": true, "thanks": true, "thank you": true, "great": true, "awesome": true,
+		"nice": true, "perfect": true, "looks good": true, "cool": true, "ok": true, "okay": true,
+	}
+	return casual[trimmed]
+}
+
+// isLegitimateClarifyingOrChatReply distinguishes intentional clarifying/storage questions
+// or casual greetings from empty responses or hallucinated "I built your website" claims.
+func isLegitimateClarifyingOrChatReply(goal, content string, hasPriorAssistantTurn bool) bool {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 15 {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+
+	// Reject replies leaking internal tool names or pretending the build is already complete
+	disallowedPhrases := []string{
+		"verifybuild", "verifyintegration", "writefiles", "createfile",
+		"website build complete", "i have built", "i've built your", "live preview ready",
+		"here is a summary of what", "🎉 what i built",
+	}
+	for _, p := range disallowedPhrases {
+		if strings.Contains(lower, p) {
+			return false
+		}
+	}
+
+	if isCasualConversationalGoal(goal) {
+		return true
+	}
+
+	// Never accept another no-code clarification if user already answered a prior question or explicitly said to proceed
+	if hasPriorAssistantTurn || isExplicitBuildProceedGoal(goal) {
+		return false
+	}
+
+	// Accept external-URL redirect explanation
+	if strings.Contains(lower, "cannot visit") || strings.Contains(lower, "can't visit") || strings.Contains(lower, "unable to visit") {
+		return true
+	}
+
+	// Accept genuine clarifying / backend-choice questions
+	return strings.Contains(trimmed, "?")
 }

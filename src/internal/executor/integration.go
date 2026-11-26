@@ -310,6 +310,11 @@ func (e *IntegrationExecutor) VerifyIntegration(ctx context.Context, args map[st
 		}
 	}
 
+	// Verify interactive navigation, route links, and functional handlers across pages and custom components
+	if navIssues := e.verifyNavigationAndHandlers(mainContent); len(navIssues) > 0 {
+		issues = append(issues, navIssues...)
+	}
+
 	// Format output
 	var sb strings.Builder
 
@@ -391,4 +396,210 @@ func extractComponentName(filePath string) string {
 	base := filepath.Base(filePath)
 	ext := filepath.Ext(base)
 	return strings.TrimSuffix(base, ext)
+}
+
+var (
+	anchorHrefRe     = regexp.MustCompile(`<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>`)
+	deadHashAnchorRe = regexp.MustCompile(`<a\b[^>]*\bhref\s*=\s*["'](?:#|)["']`)
+	noopOnClickRe    = regexp.MustCompile(`onClick\s*=\s*\{\s*\([^)]*\)\s*=>\s*(?:\{\s*\}|null|undefined)\s*\}`)
+	linkToRe         = regexp.MustCompile(`<Link\b[^>]*\bto\s*=\s*["'](/[^"'?#]*)[^"']*["']`)
+	navigateCallRe   = regexp.MustCompile(`\bnavigate\(\s*["'](/[^"'?#]*)[^"']*["']`)
+	routePathDeclRe  = regexp.MustCompile(`path\s*:\s*["']([^"']+)["']`)
+)
+
+func findLeadingSlashAnchorHrefs(content string) []string {
+	matches := anchorHrefRe.FindAllStringSubmatch(content, -1)
+	var bad []string
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		href := strings.TrimSpace(m[1])
+		if !strings.HasPrefix(href, "/") || strings.HasPrefix(href, "//") {
+			continue
+		}
+		if strings.HasPrefix(href, "/api/") ||
+			strings.HasPrefix(href, "/storage/") ||
+			strings.HasPrefix(href, "/project/") ||
+			strings.HasPrefix(href, "/files/") {
+			continue
+		}
+		if !seen[href] {
+			seen[href] = true
+			bad = append(bad, href)
+		}
+	}
+	return bad
+}
+
+func findUnhandledDeadAnchors(content string) []string {
+	matches := anchorHrefRe.FindAllStringSubmatch(content, -1)
+	var bad []string
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		fullTag := m[0]
+		href := strings.TrimSpace(m[1])
+		if href != "#" && href != "" {
+			continue
+		}
+		if strings.Contains(fullTag, "onClick") {
+			continue
+		}
+		if !seen[href] {
+			seen[href] = true
+			bad = append(bad, href)
+		}
+	}
+	return bad
+}
+
+func collectDeclaredRoutes(routesContent string) ([]string, bool) {
+	matches := routePathDeclRe.FindAllStringSubmatch(routesContent, -1)
+	var declared []string
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		p := strings.TrimSpace(m[1])
+		if p == "*" {
+			continue
+		}
+		declared = append(declared, p)
+	}
+	return declared, len(declared) > 0
+}
+
+func matchesDeclaredRoute(target string, declared []string) bool {
+	if target == "" || target == "/" {
+		return true
+	}
+	normTarget := strings.TrimSuffix(target, "/")
+	for _, r := range declared {
+		normRoute := strings.TrimSuffix(r, "/")
+		if normRoute == "" {
+			normRoute = "/"
+		}
+		if normRoute == normTarget {
+			return true
+		}
+		routeSegs := strings.Split(strings.Trim(normRoute, "/"), "/")
+		targetSegs := strings.Split(strings.Trim(normTarget, "/"), "/")
+		if len(routeSegs) == len(targetSegs) {
+			matched := true
+			for i := range routeSegs {
+				if strings.HasPrefix(routeSegs[i], ":") || routeSegs[i] == "*" {
+					continue
+				}
+				if routeSegs[i] != targetSegs[i] {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// verifyNavigationAndHandlers scans customized pages and components for broken preview links,
+// empty placeholder handlers, and <Link to="..."> / navigate(...) targets missing from routes.tsx.
+func (e *IntegrationExecutor) verifyNavigationAndHandlers(routesContent string) []IntegrationIssue {
+	declaredRoutes, hasRoutes := collectDeclaredRoutes(routesContent)
+	var issues []IntegrationIssue
+
+	scanDirs := []string{"src/pages", "src/components"}
+	for _, relDir := range scanDirs {
+		absDir := filepath.Join(e.workspacePath, relDir)
+		_ = filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			relPath, relErr := filepath.Rel(e.workspacePath, path)
+			if relErr != nil {
+				return nil
+			}
+			normRel := filepath.ToSlash(relPath)
+			if info.IsDir() {
+				if normRel == "src/components/ui" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(normRel, ".tsx") && !strings.HasSuffix(normRel, ".jsx") {
+				return nil
+			}
+			base := filepath.Base(normRel)
+			if base == "NotFound.tsx" || base == "ProtectedRoute.tsx" || base == "EmptyState.tsx" || base == "ErrorBoundary.tsx" || base == "LoadingState.tsx" {
+				return nil
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			content := string(raw)
+
+			if badAnchors := findLeadingSlashAnchorHrefs(content); len(badAnchors) > 0 {
+				issues = append(issues, IntegrationIssue{
+					File:    normRel,
+					Issue:   "broken_preview_link",
+					Details: fmt.Sprintf("Found leading-slash `<a href=\"%s\">`, which escapes the app preview base path (`/preview/:id/`). Replace with React Router `<Link to=\"...\">` for routes or `#sectionId` smooth scroll for in-page links.", strings.Join(badAnchors, ", ")),
+				})
+			}
+
+			if deadAnchors := findUnhandledDeadAnchors(content); len(deadAnchors) > 0 {
+				issues = append(issues, IntegrationIssue{
+					File:    normRel,
+					Issue:   "dead_link",
+					Details: "Contains placeholder `<a href=\"#\">` (or empty href) without an interactive handler. Wire it to a real route via `<Link to=\"...\">`, an existing `#sectionId`, or an `onClick` handler.",
+				})
+			}
+
+			if noopOnClickRe.MatchString(content) {
+				issues = append(issues, IntegrationIssue{
+					File:    normRel,
+					Issue:   "noop_handler",
+					Details: "Contains empty no-op `onClick={() => {}}` handler. Wire every button and interactive control to real state updates, navigation, modals, or toast feedback.",
+				})
+			}
+
+			if hasRoutes {
+				seenMissing := make(map[string]bool)
+				for _, re := range []*regexp.Regexp{linkToRe, navigateCallRe} {
+					for _, m := range re.FindAllStringSubmatch(content, -1) {
+						if len(m) < 2 {
+							continue
+						}
+						target := strings.TrimSpace(m[1])
+						if target == "" || strings.HasPrefix(target, "/api/") || strings.HasPrefix(target, "/storage/") || strings.HasPrefix(target, "/files/") {
+							continue
+						}
+						if !matchesDeclaredRoute(target, declaredRoutes) && !seenMissing[target] {
+							seenMissing[target] = true
+							issues = append(issues, IntegrationIssue{
+								File:    normRel,
+								Issue:   "missing_route",
+								Details: fmt.Sprintf("Navigation target `%s` is not declared in `src/routes.tsx`. Either add `{ path: '%s', element: <... />, ... }` to `src/routes.tsx` or point the link to a valid registered route.", target, target),
+							})
+						}
+					}
+				}
+			}
+
+			if len(issues) >= 12 {
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if len(issues) >= 12 {
+			break
+		}
+	}
+
+	return issues
 }

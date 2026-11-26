@@ -329,7 +329,12 @@ func buildCapabilitiesSection(caps *models.ProjectCapabilities) string {
 	}
 	var sb strings.Builder
 	if caps.Firebase != nil && caps.Firebase.Enabled {
-		sb.WriteString("## FIREBASE: Enabled. Use getFirestoreCollections to discover collections.\n\n")
+		fmt.Fprintf(&sb, "## FIREBASE: Enabled (prefix: %s). Use `useFirestore` / `useData` / `useAuth` when user wants Firebase persistence.\n\n", caps.Firebase.CollectionPrefix)
+	}
+	if caps.Supabase != nil && caps.Supabase.Enabled {
+		fmt.Fprintf(&sb, "## SUPABASE: Connected (url: %s, table prefix: %s). Use `window.__APP_CONFIG__.supabase` when user wants Supabase PostgreSQL/Auth.\n\n", caps.Supabase.URL, caps.Supabase.TablePrefix)
+	} else if caps.Supabase != nil && caps.Supabase.Available {
+		sb.WriteString("## SUPABASE: Available on plan (not yet connected in Settings -> Database).\n\n")
 	}
 	if caps.Storage != nil && caps.Storage.Enabled {
 		fmt.Fprintf(&sb, "## STORAGE: Enabled. Max %dMB.\n\n", caps.Storage.MaxFileSizeMB)
@@ -491,15 +496,30 @@ func isStarterPlaceholderHome(workspacePath string) bool {
 // formatCapabilitiesSummary renders project capabilities in a single inline line.
 func formatCapabilitiesSummary(caps *models.ProjectCapabilities) string {
 	firebaseStatus := "disabled"
-	if caps != nil && caps.Firebase != nil && caps.Firebase.Enabled {
-		if caps.Firebase.CollectionPrefix != "" {
-			firebaseStatus = fmt.Sprintf("enabled (prefix: %s)", caps.Firebase.CollectionPrefix)
-		} else {
-			firebaseStatus = "enabled"
+	if caps != nil && caps.Firebase != nil {
+		if caps.Firebase.Enabled {
+			if caps.Firebase.CollectionPrefix != "" {
+				firebaseStatus = fmt.Sprintf("enabled (prefix: %s)", caps.Firebase.CollectionPrefix)
+			} else {
+				firebaseStatus = "enabled"
+			}
+		} else if caps.Firebase.Available {
+			firebaseStatus = "available on plan (not configured yet in Settings -> Database)"
 		}
 	}
 
 	supabaseStatus := "disabled"
+	if caps != nil && caps.Supabase != nil {
+		if caps.Supabase.Enabled {
+			if caps.Supabase.TablePrefix != "" {
+				supabaseStatus = fmt.Sprintf("connected (table_prefix: %s)", caps.Supabase.TablePrefix)
+			} else {
+				supabaseStatus = "connected"
+			}
+		} else if caps.Supabase.Available {
+			supabaseStatus = "available on plan (can be connected in Settings -> Database)"
+		}
+	}
 
 	storageStatus := "disabled"
 	if caps != nil && caps.Storage != nil && caps.Storage.Enabled {
@@ -510,7 +530,7 @@ func formatCapabilitiesSummary(caps *models.ProjectCapabilities) string {
 		}
 	}
 
-	return fmt.Sprintf("Firebase: %s | Supabase: %s | File Storage: %s", firebaseStatus, supabaseStatus, storageStatus)
+	return fmt.Sprintf("Firebase: %s | Supabase: %s | File Storage: %s (localStorage fallback always available in browser)", firebaseStatus, supabaseStatus, storageStatus)
 }
 
 // readInstalledNpmDeps reads sorted dependency package names from workspace package.json.

@@ -175,6 +175,19 @@ func validateContentQuality(content string, filePath string) []string {
 		}
 	}
 
+	// 4. Interactive & preview-routing integrity checks for TSX files
+	if strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx") {
+		if badLinks := findLeadingSlashAnchorHrefs(content); len(badLinks) > 0 {
+			warnings = append(warnings, fmt.Sprintf("Uses leading-slash `<a href=\"%s\">` which breaks `/preview/:id/` routing; replace with React Router `<Link to=\"...\">` or `#section` smooth scroll.", badLinks[0]))
+		}
+		if deadHashAnchorRe.MatchString(content) {
+			warnings = append(warnings, "Contains dead placeholder `<a href=\"#\">` link; wire it to a real `#sectionId` anchor, `<Link to=\"...\">`, or interactive button handler.")
+		}
+		if noopOnClickRe.MatchString(content) {
+			warnings = append(warnings, "Contains empty no-op `onClick={() => {}}` handler; every button must trigger real state updates, navigation, or a modal/toast.")
+		}
+	}
+
 	return warnings
 }
 

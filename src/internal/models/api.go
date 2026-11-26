@@ -33,13 +33,23 @@ func DefaultFeatureFlags() FeatureFlags {
 // This tells the agent what dynamic features are available for code generation.
 type ProjectCapabilities struct {
 	Firebase *FirebaseCapability `json:"firebase,omitempty"`
+	Supabase *SupabaseCapability `json:"supabase,omitempty"`
 	Storage  *StorageCapability  `json:"storage,omitempty"`
 }
 
 // FirebaseCapability indicates Firebase availability for the project
 type FirebaseCapability struct {
 	Enabled          bool   `json:"enabled"`
+	Available        bool   `json:"available,omitempty"`
 	CollectionPrefix string `json:"collection_prefix"`
+}
+
+// SupabaseCapability indicates Supabase availability/configuration for the project
+type SupabaseCapability struct {
+	Enabled     bool   `json:"enabled"`
+	Available   bool   `json:"available,omitempty"`
+	URL         string `json:"url,omitempty"`
+	TablePrefix string `json:"table_prefix,omitempty"`
 }
 
 // StorageCapability indicates file storage availability for the project
