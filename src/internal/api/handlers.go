@@ -1051,6 +1051,11 @@ func (s *Server) handleReset(c *gin.Context) {
 		_ = os.RemoveAll(filepath.Join(workspacePath, entry.Name()))
 	}
 
+	// Clear cached revision manager so reset workspaces start with clean history
+	s.revisionMu.Lock()
+	delete(s.revisionManagers, session.WorkspaceID)
+	s.revisionMu.Unlock()
+
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
@@ -1454,17 +1459,9 @@ func (s *Server) getOrCreateRevisionManager(workspaceID string) *revision.Manage
 	return mgr
 }
 
-// handleUndo reverts workspace to the previous revision
-func (s *Server) handleUndo(c *gin.Context) {
-	_, workspaceID, ok := s.resolveWorkspaceFromRequest(c)
-	if !ok {
-		return
-	}
-
-	mgr := s.getOrCreateRevisionManager(workspaceID)
-	info, err := mgr.Undo()
+func (s *Server) respondRevisionResult(c *gin.Context, mgr *revision.Manager, info *revision.RevisionInfo, err error) {
+	pointer, total, canUndo, canRedo := mgr.Status()
 	if err != nil {
-		pointer, total, canUndo, canRedo := mgr.Status()
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success":  false,
 			"error":    err.Error(),
@@ -1476,7 +1473,6 @@ func (s *Server) handleUndo(c *gin.Context) {
 		return
 	}
 
-	pointer, total, canUndo, canRedo := mgr.Status()
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
 		"revision": info,
@@ -1485,6 +1481,18 @@ func (s *Server) handleUndo(c *gin.Context) {
 		"can_undo": canUndo,
 		"can_redo": canRedo,
 	})
+}
+
+// handleUndo reverts workspace to the previous revision
+func (s *Server) handleUndo(c *gin.Context) {
+	_, workspaceID, ok := s.resolveWorkspaceFromRequest(c)
+	if !ok {
+		return
+	}
+
+	mgr := s.getOrCreateRevisionManager(workspaceID)
+	info, err := mgr.Undo()
+	s.respondRevisionResult(c, mgr, info, err)
 }
 
 // handleRedo moves workspace forward to the next revision
@@ -1496,28 +1504,28 @@ func (s *Server) handleRedo(c *gin.Context) {
 
 	mgr := s.getOrCreateRevisionManager(workspaceID)
 	info, err := mgr.Redo()
-	if err != nil {
-		pointer, total, canUndo, canRedo := mgr.Status()
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success":  false,
-			"error":    err.Error(),
-			"current":  pointer,
-			"total":    total,
-			"can_undo": canUndo,
-			"can_redo": canRedo,
-		})
+	s.respondRevisionResult(c, mgr, info, err)
+}
+
+// handleRestoreRevision jumps directly to a specific revision ID
+func (s *Server) handleRestoreRevision(c *gin.Context) {
+	_, workspaceID, ok := s.resolveWorkspaceFromRequest(c)
+	if !ok {
 		return
 	}
 
-	pointer, total, canUndo, canRedo := mgr.Status()
-	c.JSON(http.StatusOK, gin.H{
-		"success":  true,
-		"revision": info,
-		"current":  pointer,
-		"total":    total,
-		"can_undo": canUndo,
-		"can_redo": canRedo,
-	})
+	var req struct {
+		RevisionID int `json:"revision_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.RevisionID <= 0 {
+		mgr := s.getOrCreateRevisionManager(workspaceID)
+		s.respondRevisionResult(c, mgr, nil, fmt.Errorf("revision_id is required"))
+		return
+	}
+
+	mgr := s.getOrCreateRevisionManager(workspaceID)
+	info, err := mgr.Restore(req.RevisionID)
+	s.respondRevisionResult(c, mgr, info, err)
 }
 
 // handleListRevisions returns all revisions with current pointer position

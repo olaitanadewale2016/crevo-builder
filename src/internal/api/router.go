@@ -62,9 +62,10 @@ func (s *Server) SetupRouter() *gin.Engine {
 		// Class editing (visual style editor)
 		api.PATCH("/class-edit-workspace/:workspace_id", s.handleClassEdit)
 
-		// Revision management (undo/redo)
+		// Revision management (undo/redo/restore)
 		api.POST("/undo-workspace/:workspace_id", s.handleUndo)
 		api.POST("/redo-workspace/:workspace_id", s.handleRedo)
+		api.POST("/restore-revision-workspace/:workspace_id", s.handleRestoreRevision)
 		api.GET("/revisions-workspace/:workspace_id", s.handleListRevisions)
 
 		// Recovery

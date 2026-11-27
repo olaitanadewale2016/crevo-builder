@@ -300,10 +300,38 @@ func (m *Manager) Redo() (*RevisionInfo, error) {
 		return nil, fmt.Errorf("nothing to redo")
 	}
 
-	m.pointer++
+	return m.restoreIndexLocked(m.pointer + 1)
+}
+
+// Restore jumps directly to the revision matching revisionID.
+func (m *Manager) Restore(revisionID int) (*RevisionInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	targetIdx := -1
+	for i := range m.revisions {
+		if m.revisions[i].ID == revisionID {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx == -1 {
+		return nil, fmt.Errorf("revision %d not found", revisionID)
+	}
+
+	return m.restoreIndexLocked(targetIdx)
+}
+
+func (m *Manager) restoreIndexLocked(targetIdx int) (*RevisionInfo, error) {
+	if targetIdx < 0 || targetIdx >= len(m.revisions) {
+		return nil, fmt.Errorf("revision index %d out of range", targetIdx)
+	}
+
+	prevPointer := m.pointer
+	m.pointer = targetIdx
 	rev := &m.revisions[m.pointer]
 	if err := m.restoreRevision(rev); err != nil {
-		m.pointer-- // rollback pointer on failure
+		m.pointer = prevPointer // rollback pointer on failure
 		return nil, fmt.Errorf("failed to restore revision: %w", err)
 	}
 	m.saveToDisk(nil, nil)
