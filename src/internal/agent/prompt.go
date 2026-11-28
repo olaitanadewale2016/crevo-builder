@@ -193,6 +193,13 @@ func evaluateConditions(cond *models.PromptConditions, caps *models.ProjectCapab
 		}
 	}
 
+	if cond.InternalAiEnabled != nil {
+		enabled := caps != nil && caps.InternalAI != nil && caps.InternalAI.Enabled
+		if *cond.InternalAiEnabled != enabled {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -338,6 +345,11 @@ func buildCapabilitiesSection(caps *models.ProjectCapabilities) string {
 	}
 	if caps.Storage != nil && caps.Storage.Enabled {
 		fmt.Fprintf(&sb, "## STORAGE: Enabled (max %dMB). Use `useSystemStorage` from `@/hooks/useSystemStorage` for file uploads.\n\n", caps.Storage.MaxFileSizeMB)
+	}
+	if caps.InternalAI != nil && caps.InternalAI.Enabled {
+		sb.WriteString("## INTERNAL AI: Enabled (Admin Only). Use `useInternalAi` from `@/hooks/useInternalAi` when the administrator asks for AI features powered by the platform's internal AI provider. Never hardcode API keys.\n\n")
+	} else {
+		sb.WriteString("## INTERNAL AI: Disabled (Admin Only). NEVER import `useInternalAi` or call `/api/app/.../ai`. If the user asks their app to use the platform's internal AI / Gemini provider, politely explain that built-in platform AI access is reserved for administrators and offer a user-provided API key setting inside the app or clean client-side logic.\n\n")
 	}
 	return sb.String()
 }
@@ -535,7 +547,12 @@ func formatCapabilitiesSummary(caps *models.ProjectCapabilities) string {
 		}
 	}
 
-	return fmt.Sprintf("Firebase: %s | Supabase: %s | File Storage: %s (localStorage fallback always available in browser)", firebaseStatus, supabaseStatus, storageStatus)
+	internalAiStatus := "disabled (admin-only)"
+	if caps != nil && caps.InternalAI != nil && caps.InternalAI.Enabled {
+		internalAiStatus = "enabled (admin-only)"
+	}
+
+	return fmt.Sprintf("Firebase: %s | Supabase: %s | File Storage: %s | Internal AI: %s (localStorage fallback always available in browser)", firebaseStatus, supabaseStatus, storageStatus, internalAiStatus)
 }
 
 // readInstalledNpmDeps reads sorted dependency package names from workspace package.json.

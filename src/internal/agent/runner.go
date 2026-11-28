@@ -72,7 +72,7 @@ func randomPhrase(phrases []string) string {
 
 // formatProjectCapabilities formats project capabilities as JSON for tool result
 func formatProjectCapabilities(caps *models.ProjectCapabilities) string {
-	var firebase, supabase, storage string
+	var firebase, supabase, storage, internalAI string
 
 	if caps.Firebase != nil {
 		firebase = fmt.Sprintf(`"firebase":{"enabled":%t,"available":%t,"collection_prefix":"%s"}`,
@@ -95,7 +95,14 @@ func formatProjectCapabilities(caps *models.ProjectCapabilities) string {
 		storage = `"storage":{"enabled":false,"max_file_size_mb":0}`
 	}
 
-	return fmt.Sprintf("{%s,%s,%s}", firebase, supabase, storage)
+	if caps.InternalAI != nil {
+		internalAI = fmt.Sprintf(`"internal_ai":{"enabled":%t,"admin_only":%t}`,
+			caps.InternalAI.Enabled, caps.InternalAI.AdminOnly)
+	} else {
+		internalAI = `"internal_ai":{"enabled":false,"admin_only":true}`
+	}
+
+	return fmt.Sprintf("{%s,%s,%s,%s}", firebase, supabase, storage, internalAI)
 }
 
 // handleGetFirestoreCollections fetches Firestore collections from Laravel

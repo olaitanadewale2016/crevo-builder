@@ -75,8 +75,9 @@ type TemplatePrompt struct {
 
 // PromptConditions defines when a prompt section should be included (AND logic)
 type PromptConditions struct {
-	FirebaseEnabled *bool `json:"firebase_enabled,omitempty"`
-	StorageEnabled  *bool `json:"storage_enabled,omitempty"`
+	FirebaseEnabled   *bool `json:"firebase_enabled,omitempty"`
+	StorageEnabled    *bool `json:"storage_enabled,omitempty"`
+	InternalAiEnabled *bool `json:"internal_ai_enabled,omitempty"`
 }
 
 // TemplatePrompts is the collection of prompt sections from template.json

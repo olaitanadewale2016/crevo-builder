@@ -9,6 +9,7 @@ Check `Firebase`, `Supabase`, and `File Storage` in Workspace Reference above:
 - **Otherwise build immediately**! When building:
   * If **Firebase is enabled**: use `useAuth` for login/signup, `useUserFirestore<T>('collection')` for per-user private records (cycle logs, symptoms, journals, tasks -> auto-scoped to `users/<uid>/<collection>` with auto auth re-sync), `useFirestoreDoc<T>('users', user?.uid)` for user profiles/settings, `useFirestore`/`useData` for shared collections, and `useFirebaseStorage`/`useSystemStorage` for file uploads. Sort in JS (NEVER combine `where()` + `orderBy()`), and verify write return values before `toast.success()`.
   * If **Supabase is connected**: use `window.__APP_CONFIG__.supabase`.
+  * If **Internal AI is enabled (admin-only)**: use `useInternalAi()` from `@/hooks/useInternalAi` when asked for built-in AI features; if **disabled (admin-only)**, NEVER use `useInternalAi` or `/api/app/.../ai` — explain built-in platform AI is admin-only and offer a user-provided API key setting or client-side logic.
   * Otherwise use a persisted `localStorage` + React store with seeded sample items. Never lock main app routes behind `<ProtectedRoute>` without instant guest/demo access.
 
 ## WORKFLOW & COMPLEX APP EXECUTION

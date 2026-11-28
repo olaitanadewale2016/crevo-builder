@@ -32,9 +32,17 @@ func DefaultFeatureFlags() FeatureFlags {
 // ProjectCapabilities holds project feature availability passed from Laravel.
 // This tells the agent what dynamic features are available for code generation.
 type ProjectCapabilities struct {
-	Firebase *FirebaseCapability `json:"firebase,omitempty"`
-	Supabase *SupabaseCapability `json:"supabase,omitempty"`
-	Storage  *StorageCapability  `json:"storage,omitempty"`
+	Firebase   *FirebaseCapability   `json:"firebase,omitempty"`
+	Supabase   *SupabaseCapability   `json:"supabase,omitempty"`
+	Storage    *StorageCapability    `json:"storage,omitempty"`
+	InternalAI *InternalAICapability `json:"internal_ai,omitempty"`
+}
+
+// InternalAICapability indicates whether the platform's internal AI provider proxy
+// (e.g. Gemini) is enabled for this project. Strictly restricted to administrator projects.
+type InternalAICapability struct {
+	Enabled   bool `json:"enabled"`
+	AdminOnly bool `json:"admin_only"`
 }
 
 // FirebaseCapability indicates Firebase availability for the project
