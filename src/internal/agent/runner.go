@@ -446,6 +446,9 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 	// Load template prompts and metadata from workspace whenever template.json exists
 	// (loadTemplatePrompts/loadTemplateMetadata return nil safely on empty workspaces)
 	workspaceDir := r.executor.GetWorkspacePath()
+	isExistingCustomizedApp := executor.WorkspaceHasCustomizedApp(workspaceDir)
+	editIntent := ClassifyEditIntent(goal)
+	filesReadInRun := make(map[string]bool)
 	templatePrompts := r.loadTemplatePrompts(workspaceDir)
 	templateMetadata := r.loadTemplateMetadata(workspaceDir)
 
@@ -483,7 +486,11 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 	case "low":
 		systemPrompt += "\n\n[EFFORT LEVEL: LOW — FAST MODE]\nExecute the request directly and concisely in as few tool calls as possible. Skip lengthy exploratory planning and focus on immediate, high-speed delivery."
 	case "high":
-		systemPrompt += "\n\n[EFFORT LEVEL: HIGH — DEEP ARCHITECTURAL MODE]\nApply deep reasoning, comprehensive UI/UX polish, rich micro-interactions, responsive layouts, and thorough multi-component implementation."
+		if isExistingCustomizedApp && !editIntent.WantsFullRedesign {
+			systemPrompt += "\n\n[EFFORT LEVEL: HIGH — DEEP SURGICAL PRECISION]\nApply deep reasoning to understand the user's exact need and execute a clean, bug-free, targeted change with surgical editFile patches while strictly preserving the existing logo, theme, layout, and all untouched UI."
+		} else {
+			systemPrompt += "\n\n[EFFORT LEVEL: HIGH — DEEP ARCHITECTURAL MODE]\nApply deep reasoning, comprehensive UI/UX polish, rich micro-interactions, responsive layouts, and thorough multi-component implementation."
+		}
 	}
 
 	// Initialize conversation with system prompt
@@ -655,9 +662,9 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 	// Track last non-empty AI content for final message
 	var lastAIContent string
 
-	// Integration & build verification: track fix attempts to guarantee compiled dist/ before finishing
+	// Integration & build verification: track fix attempts to guarantee compiled dist/ and functional buttons/links before finishing
 	integrationFixAttempts := 0
-	const maxIntegrationFixes = 2
+	const maxIntegrationFixes = 3
 	var lastIntegrationError string
 	integrationFinalNotified := false // Flag to track if we've sent final notification about unresolved issues
 	buildFixAttempts := 0
@@ -956,10 +963,16 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 				continue
 			}
 
-			// Before completing, scan src/pages/ for unregistered pages and verify interactive links/routes
+			// Before completing, scan src/pages/ for unregistered pages and verify all buttons, CTAs, forms, and menu links work
 			// Skip on unedited starter workspaces or if we've already sent final notification about unresolved issues
 			if (!isUneditedStarter || hasCodeChanges) && !integrationFinalNotified && integrationFixAttempts < maxIntegrationFixes {
 				pageFiles := scanPageFiles(r.executor.GetWorkspacePath())
+				if len(pageFiles) == 0 {
+					appPath := filepath.Join(r.executor.GetWorkspacePath(), "src", "App.tsx")
+					if _, statErr := os.Stat(appPath); statErr == nil {
+						pageFiles = []string{"src/App.tsx"}
+					}
+				}
 				if len(pageFiles) > 0 {
 					streamer.SendStatus("verifying", "Checking page integration...")
 
@@ -1019,7 +1032,7 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 						}).Info("Integration issues found, re-entering loop to fix")
 
 						fixPrompt := fmt.Sprintf(
-							"⚠️ INTEGRATION & NAVIGATION ISSUES DETECTED:\n\n%s\n\nFix EVERY issue before finishing: wire missing pages/routes in src/routes.tsx, replace any leading-slash `<a href=\"/...\">` with `<Link to=\"...\">` or `#section` scroll, replace any dead `href=\"#\"` / empty `onClick={() => {}}` handlers with real working behavior, and ensure all builds compile cleanly.",
+							"⚠️ NON-FUNCTIONAL BUTTONS, CTAs, OR NAVIGATION LINKS DETECTED:\n\n%s\n\nFix EVERY issue surgically with editFile before finishing (keeping the existing logo and untouched UI intact): wire every button and CTA with real interactive behavior (dialog/modal, route `<Link to=\"...\">` via `asChild`, `navigate(...)`, state update, or `onSubmit` with toast), ensure every `#sectionId` anchor matches a real `id=\"...\"` section, register every linked route in `src/routes.tsx`, replace any leading-slash `<a href=\"/...\">` with `<Link to=\"...\">`, and ensure zero dead `href=\"#\"` or no-op `onClick` handlers remain.",
 							verifyResult.Content,
 						)
 						messages = append(messages, models.Message{
@@ -1150,6 +1163,56 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 				continue
 			}
 
+			// Surgical follow-up guard: on already-built apps, prevent accidental logo removal,
+			// global CSS theme wiping, or blind full-file overwrites when not explicitly requested.
+			if isExistingCustomizedApp && (toolCall.Name == "createFile" || toolCall.Name == "writeFiles" || toolCall.Name == "editFile") {
+				var guardErr string
+				switch toolCall.Name {
+				case "createFile":
+					p, _ := toolCall.Arguments["path"].(string)
+					c, _ := toolCall.Arguments["content"].(string)
+					guardErr = ValidateFollowUpWrite(workspaceDir, p, c, editIntent, filesReadInRun)
+				case "writeFiles":
+					if filesRaw, ok := toolCall.Arguments["files"].([]interface{}); ok {
+						var errs []string
+						for _, item := range filesRaw {
+							if m, ok := item.(map[string]interface{}); ok {
+								p, _ := m["path"].(string)
+								c, _ := m["content"].(string)
+								if msg := ValidateFollowUpWrite(workspaceDir, p, c, editIntent, filesReadInRun); msg != "" {
+									errs = append(errs, msg)
+								}
+							}
+						}
+						if len(errs) > 0 {
+							guardErr = strings.Join(errs, "\n")
+						}
+					}
+				case "editFile":
+					p, _ := toolCall.Arguments["path"].(string)
+					guardErr = ValidateFollowUpEdit(workspaceDir, p, toolCall.Arguments, editIntent)
+				}
+
+				if guardErr != "" {
+					r.logger.WithFields(logrus.Fields{
+						"session_id": session.ID,
+						"tool":       toolCall.Name,
+						"guard":      logging.TruncateForLog(guardErr, 240),
+					}).Warn("Follow-up preservation guard blocked unsafe file mutation")
+
+					sessionToolResults[toolCall.ID] = executor.ToolResult{
+						ToolCallID: toolCall.ID,
+						Success:    false,
+						Content:    guardErr,
+					}
+					streamer.SendToolCall(toolCall.ID, toolCall.Name, toolCall.Arguments)
+					action, target, category := getActionDescription(toolCall.Name, toolCall.Arguments)
+					streamer.SendAction(action, target, "", category)
+					streamer.SendToolResult(toolCall.ID, toolCall.Name, false, guardErr, 0, iterationsRun)
+					continue
+				}
+			}
+
 			// Stream tool call event
 			streamer.SendToolCall(toolCall.ID, toolCall.Name, toolCall.Arguments)
 
@@ -1258,6 +1321,23 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 				"tool":       toolName,
 				"success":    result.Success,
 			}).Debug("Tool completed")
+
+			// Record files read during this run so surgical edit guards know what the AI inspected
+			if result.Success {
+				if toolName == "readFile" {
+					if p, ok := batchRequests[i].Arguments["path"].(string); ok && strings.TrimSpace(p) != "" {
+						filesReadInRun[normalizeWorkspaceRelPath(p)] = true
+					}
+				} else if toolName == "readFiles" {
+					if pathsRaw, ok := batchRequests[i].Arguments["paths"].([]interface{}); ok {
+						for _, item := range pathsRaw {
+							if p, ok := item.(string); ok && strings.TrimSpace(p) != "" {
+								filesReadInRun[normalizeWorkspaceRelPath(p)] = true
+							}
+						}
+					}
+				}
+			}
 
 			// Stream tool result
 			streamer.SendToolResult(
@@ -1418,8 +1498,15 @@ func (r *Runner) RunWithImages(ctx context.Context, session *Session, goal strin
 		}
 		if readUIPrimitive || consecutiveReadOnlyTurns >= 2 {
 			steerMsg := "STOP scanning more files — all project structure, component exports, packages, routes, and stock images are already in your Workspace Reference. Write the website files NOW using writeFiles (or parallel createFile/editFile calls), then call verifyBuild."
+			if isExistingCustomizedApp && !editIntent.WantsFullRedesign {
+				steerMsg = "STOP scanning more files — you already have the target file context. Apply ONLY the user's exact requested change NOW using minimal surgical editFile patches (keep the existing logo, theme, and untouched UI intact), then call verifyBuild."
+			}
 			if readUIPrimitive {
-				steerMsg = "STOP reading files under src/components/ui/ — every shadcn/ui export is already listed in your Workspace Reference. Write the website files NOW using writeFiles (or parallel createFile/editFile calls), then call verifyBuild."
+				if isExistingCustomizedApp && !editIntent.WantsFullRedesign {
+					steerMsg = "STOP reading files under src/components/ui/ — every shadcn/ui export is already listed in your Workspace Reference. Apply ONLY the user's exact requested change NOW using surgical editFile patches (preserving the existing logo and UI), then call verifyBuild."
+				} else {
+					steerMsg = "STOP reading files under src/components/ui/ — every shadcn/ui export is already listed in your Workspace Reference. Write the website files NOW using writeFiles (or parallel createFile/editFile calls), then call verifyBuild."
+				}
 			}
 			messages = append(messages, models.Message{
 				Role:    "user",

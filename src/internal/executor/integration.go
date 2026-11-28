@@ -399,19 +399,219 @@ func extractComponentName(filePath string) string {
 }
 
 var (
-	anchorHrefRe     = regexp.MustCompile(`<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>`)
-	deadHashAnchorRe = regexp.MustCompile(`<a\b[^>]*\bhref\s*=\s*["'](?:#|)["']`)
-	noopOnClickRe    = regexp.MustCompile(`onClick\s*=\s*\{\s*\([^)]*\)\s*=>\s*(?:\{\s*\}|null|undefined)\s*\}`)
-	linkToRe         = regexp.MustCompile(`<Link\b[^>]*\bto\s*=\s*["'](/[^"'?#]*)[^"']*["']`)
-	navigateCallRe   = regexp.MustCompile(`\bnavigate\(\s*["'](/[^"'?#]*)[^"']*["']`)
-	routePathDeclRe  = regexp.MustCompile(`path\s*:\s*["']([^"']+)["']`)
+	hrefAttrRe            = regexp.MustCompile(`\bhref\s*=\s*["']([^"']*)["']`)
+	toAttrRe              = regexp.MustCompile(`\bto\s*=\s*["']([^"']*)["']`)
+	noopOnClickRe         = regexp.MustCompile(`\bon(?:Click|Submit)\s*=\s*\{\s*(?:async\s*)?\([^)]*\)\s*=>\s*(?:\{\s*(?:console\.(?:log|warn|info)\([^)]*\);?\s*)?\}|null|undefined|console\.(?:log|warn|info)\([^)]*\))\s*\}`)
+	linkToRe              = regexp.MustCompile(`<(?:Link|NavLink)\b[^>]*\bto\s*=\s*["'](/[^"'?#]*)[^"']*["']`)
+	navigateCallRe        = regexp.MustCompile(`\bnavigate\(\s*["'](/[^"'?#]*)[^"']*["']`)
+	windowLocNavRe        = regexp.MustCompile(`\bwindow\.location(?:\.href\s*=|\.assign\(|\.replace\()\s*["'](/[^"'?#]*)[^"']*["']`)
+	routePathDeclRe       = regexp.MustCompile(`path\s*:\s*["']([^"']+)["']`)
+	jsxIdAttrRe           = regexp.MustCompile(`\bid\s*=\s*(?:["']([A-Za-z][A-Za-z0-9_-]*)["']|\{\s*["']([A-Za-z][A-Za-z0-9_-]*)["']\s*\})`)
+	hashHrefTargetRe      = regexp.MustCompile(`\bhref\s*=\s*["']#([A-Za-z][A-Za-z0-9_-]*)["']`)
+	getElemByIdCallRe     = regexp.MustCompile(`document\.(?:getElementById\(\s*["']([A-Za-z][A-Za-z0-9_-]*)["']|querySelector\(\s*["']#([A-Za-z][A-Za-z0-9_-]*)["'])`)
+	triggerWrapperRe      = regexp.MustCompile(`<(?:DialogTrigger|SheetTrigger|DropdownMenuTrigger|PopoverTrigger|TooltipTrigger|AlertDialogTrigger|AlertDialogAction|AlertDialogCancel|CollapsibleTrigger|AccordionTrigger|TabsTrigger|Link|NavLink|a)\b[^>]*>\s*$`)
+	spreadPropsRe         = regexp.MustCompile(`\{\s*\.\.\.[A-Za-z_$]`)
+	buttonInteractiveRe   = regexp.MustCompile(`\b(?:onClick|onMouseDown|onPointerDown|onTouchStart|asChild)\b`)
+	buttonSubmitResetRe   = regexp.MustCompile(`\btype\s*=\s*(?:["'](?:submit|reset)["']|\{\s*["'](?:submit|reset)["']\s*\})`)
+	buttonExplicitTypeBtn = regexp.MustCompile(`\btype\s*=\s*(?:["']button["']|\{\s*["']button["']\s*\})`)
+	staticDisabledRe      = regexp.MustCompile(`\bdisabled(?:\s*=\s*\{\s*true\s*\}|\s|/|>)`)
+	htmlTagStripRe        = regexp.MustCompile(`<[^>]+>`)
 )
 
+type jsxOpeningTag struct {
+	name       string
+	start      int
+	end        int
+	raw        string
+	selfClosed bool
+}
+
+// scanJSXOpeningTags scans JSX opening tags for the specified tag names while properly
+// skipping string literals and balanced `{ ... }` expressions (so `=>` inside handlers
+// never prematurely terminates tag parsing).
+func scanJSXOpeningTags(content string, targets map[string]bool) []jsxOpeningTag {
+	var tags []jsxOpeningTag
+	n := len(content)
+	for i := 0; i < n; i++ {
+		if content[i] != '<' {
+			continue
+		}
+		if i+1 >= n {
+			break
+		}
+		// Skip closing tags, comments, fragments
+		next := content[i+1]
+		if next == '/' || next == '!' || next == '>' {
+			continue
+		}
+		// Read tag identifier
+		j := i + 1
+		for j < n && ((content[j] >= 'a' && content[j] <= 'z') || (content[j] >= 'A' && content[j] <= 'Z') || (content[j] >= '0' && content[j] <= '9') || content[j] == '_' || content[j] == '.') {
+			j++
+		}
+		tagName := content[i+1 : j]
+		if !targets[tagName] {
+			continue
+		}
+		// Ensure boundary after tag name
+		if j < n && content[j] != ' ' && content[j] != '\t' && content[j] != '\n' && content[j] != '\r' && content[j] != '>' && content[j] != '/' {
+			continue
+		}
+
+		// Scan forward until matching '>' outside quotes and `{ ... }`
+		braceDepth := 0
+		inQuote := byte(0)
+		k := j
+		foundEnd := -1
+		for k < n {
+			ch := content[k]
+			if inQuote != 0 {
+				if ch == '\\' {
+					k += 2
+					continue
+				}
+				if ch == inQuote {
+					inQuote = 0
+				}
+				k++
+				continue
+			}
+			if ch == '"' || ch == '\'' || ch == '`' {
+				inQuote = ch
+				k++
+				continue
+			}
+			if ch == '{' {
+				braceDepth++
+				k++
+				continue
+			}
+			if ch == '}' {
+				if braceDepth > 0 {
+					braceDepth--
+				}
+				k++
+				continue
+			}
+			if ch == '>' && braceDepth == 0 {
+				foundEnd = k
+				break
+			}
+			k++
+		}
+		if foundEnd == -1 {
+			continue
+		}
+		raw := content[i : foundEnd+1]
+		selfClosed := foundEnd > i && content[foundEnd-1] == '/'
+		tags = append(tags, jsxOpeningTag{
+			name:       tagName,
+			start:      i,
+			end:        foundEnd + 1,
+			raw:        raw,
+			selfClosed: selfClosed,
+		})
+		i = foundEnd
+	}
+	return tags
+}
+
+// isInsideOpenForm returns true if pos sits inside a <form ...> ... </form> block.
+func isInsideOpenForm(content string, pos int) bool {
+	prefix := content[:pos]
+	lastOpen := strings.LastIndex(strings.ToLower(prefix), "<form")
+	if lastOpen == -1 {
+		return false
+	}
+	lastClose := strings.LastIndex(strings.ToLower(prefix), "</form>")
+	return lastOpen > lastClose
+}
+
+// extractJSXTagLabel grabs a concise human-readable label inside <Button>Label</Button>.
+func extractJSXTagLabel(content string, tag jsxOpeningTag) string {
+	if tag.selfClosed || tag.end >= len(content) {
+		return ""
+	}
+	closing := "</" + tag.name + ">"
+	rest := content[tag.end:]
+	if len(rest) > 300 {
+		rest = rest[:300]
+	}
+	closeIdx := strings.Index(rest, closing)
+	if closeIdx == -1 {
+		return ""
+	}
+	inner := htmlTagStripRe.ReplaceAllString(rest[:closeIdx], " ")
+	inner = strings.Join(strings.Fields(inner), " ")
+	if len(inner) > 40 {
+		inner = inner[:40] + "..."
+	}
+	return inner
+}
+
+// findDeadButtons returns labels/descriptions of <button> or <Button> elements that
+// have no interactive handler (onClick, asChild, submit/reset, trigger wrapper, or spread props).
+func findDeadButtons(content string) []string {
+	tags := scanJSXOpeningTags(content, map[string]bool{"button": true, "Button": true})
+	var dead []string
+	seen := make(map[string]bool)
+
+	for _, tag := range tags {
+		// Skip if it already has an interactive handler, asChild, submit/reset type, spread props, or static disabled
+		if buttonInteractiveRe.MatchString(tag.raw) ||
+			buttonSubmitResetRe.MatchString(tag.raw) ||
+			spreadPropsRe.MatchString(tag.raw) ||
+			staticDisabledRe.MatchString(tag.raw) {
+			continue
+		}
+
+		// Skip if wrapped immediately inside a Radix/shadcn trigger or router Link
+		winStart := tag.start - 260
+		if winStart < 0 {
+			winStart = 0
+		}
+		before := strings.TrimSpace(content[winStart:tag.start])
+		if triggerWrapperRe.MatchString(before) {
+			continue
+		}
+
+		// Skip native submit buttons inside <form onSubmit={...}> unless explicitly type="button"
+		if isInsideOpenForm(content, tag.start) && !buttonExplicitTypeBtn.MatchString(tag.raw) {
+			continue
+		}
+
+		label := extractJSXTagLabel(content, tag)
+		desc := fmt.Sprintf("<%s>", tag.name)
+		if label != "" {
+			desc = fmt.Sprintf(`<%s>"%s"</%s>`, tag.name, label, tag.name)
+		}
+		if !seen[desc] {
+			seen[desc] = true
+			dead = append(dead, desc)
+			if len(dead) >= 5 {
+				break
+			}
+		}
+	}
+	return dead
+}
+
+// findDeadForms returns true if any <form> tag lacks both onSubmit and action attributes.
+func findDeadForms(content string) bool {
+	tags := scanJSXOpeningTags(content, map[string]bool{"form": true})
+	for _, tag := range tags {
+		if !strings.Contains(tag.raw, "onSubmit") && !strings.Contains(tag.raw, "action=") && !spreadPropsRe.MatchString(tag.raw) {
+			return true
+		}
+	}
+	return false
+}
+
 func findLeadingSlashAnchorHrefs(content string) []string {
-	matches := anchorHrefRe.FindAllStringSubmatch(content, -1)
 	var bad []string
 	seen := make(map[string]bool)
-	for _, m := range matches {
+	for _, tag := range scanJSXOpeningTags(content, map[string]bool{"a": true}) {
+		m := hrefAttrRe.FindStringSubmatch(tag.raw)
 		if len(m) < 2 {
 			continue
 		}
@@ -430,23 +630,12 @@ func findLeadingSlashAnchorHrefs(content string) []string {
 			bad = append(bad, href)
 		}
 	}
-	return bad
-}
-
-func findUnhandledDeadAnchors(content string) []string {
-	matches := anchorHrefRe.FindAllStringSubmatch(content, -1)
-	var bad []string
-	seen := make(map[string]bool)
-	for _, m := range matches {
+	for _, m := range windowLocNavRe.FindAllStringSubmatch(content, -1) {
 		if len(m) < 2 {
 			continue
 		}
-		fullTag := m[0]
 		href := strings.TrimSpace(m[1])
-		if href != "#" && href != "" {
-			continue
-		}
-		if strings.Contains(fullTag, "onClick") {
+		if strings.HasPrefix(href, "/api/") || strings.HasPrefix(href, "/storage/") || strings.HasPrefix(href, "/files/") {
 			continue
 		}
 		if !seen[href] {
@@ -455,6 +644,95 @@ func findUnhandledDeadAnchors(content string) []string {
 		}
 	}
 	return bad
+}
+
+func findUnhandledDeadAnchors(content string) []string {
+	var bad []string
+	seen := make(map[string]bool)
+	for _, tag := range scanJSXOpeningTags(content, map[string]bool{"a": true}) {
+		m := hrefAttrRe.FindStringSubmatch(tag.raw)
+		if len(m) < 2 {
+			continue
+		}
+		href := strings.TrimSpace(m[1])
+		lowerHref := strings.ToLower(href)
+		isDead := href == "#" || href == "" || strings.HasPrefix(lowerHref, "javascript:")
+		if !isDead {
+			continue
+		}
+		if strings.Contains(tag.raw, "onClick") || spreadPropsRe.MatchString(tag.raw) {
+			continue
+		}
+		if !seen[href] {
+			seen[href] = true
+			bad = append(bad, href)
+		}
+	}
+	for _, tag := range scanJSXOpeningTags(content, map[string]bool{"Link": true, "NavLink": true}) {
+		m := toAttrRe.FindStringSubmatch(tag.raw)
+		if len(m) < 2 {
+			continue
+		}
+		toVal := strings.TrimSpace(m[1])
+		if toVal != "#" && toVal != "" {
+			continue
+		}
+		if strings.Contains(tag.raw, "onClick") || spreadPropsRe.MatchString(tag.raw) {
+			continue
+		}
+		if !seen["Link:empty"] {
+			seen["Link:empty"] = true
+			bad = append(bad, "#")
+		}
+	}
+	return bad
+}
+
+func collectDeclaredSectionIDs(fileContents map[string]string) map[string]bool {
+	ids := map[string]bool{
+		"main-content": true,
+		"top":          true,
+		"root":         true,
+	}
+	for _, content := range fileContents {
+		for _, m := range jsxIdAttrRe.FindAllStringSubmatch(content, -1) {
+			if len(m) >= 2 && m[1] != "" {
+				ids[m[1]] = true
+			} else if len(m) >= 3 && m[2] != "" {
+				ids[m[2]] = true
+			}
+		}
+	}
+	return ids
+}
+
+func findMissingSectionAnchors(content string, declaredIDs map[string]bool) []string {
+	var missing []string
+	seen := make(map[string]bool)
+	checkID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || declaredIDs[id] || seen[id] {
+			return
+		}
+		seen[id] = true
+		missing = append(missing, "#"+id)
+	}
+	for _, tag := range scanJSXOpeningTags(content, map[string]bool{"a": true}) {
+		if strings.Contains(tag.raw, "onClick") {
+			continue
+		}
+		if m := hashHrefTargetRe.FindStringSubmatch(tag.raw); len(m) >= 2 {
+			checkID(m[1])
+		}
+	}
+	for _, m := range getElemByIdCallRe.FindAllStringSubmatch(content, -1) {
+		if len(m) >= 2 && m[1] != "" {
+			checkID(m[1])
+		} else if len(m) >= 3 && m[2] != "" {
+			checkID(m[2])
+		}
+	}
+	return missing
 }
 
 func collectDeclaredRoutes(routesContent string) ([]string, bool) {
@@ -507,11 +785,22 @@ func matchesDeclaredRoute(target string, declared []string) bool {
 	return false
 }
 
-// verifyNavigationAndHandlers scans customized pages and components for broken preview links,
-// empty placeholder handlers, and <Link to="..."> / navigate(...) targets missing from routes.tsx.
+// verifyNavigationAndHandlers scans customized pages, components, and App.tsx for dead buttons/CTAs,
+// unwired forms, broken preview links, missing #sectionId targets, empty handlers, and
+// <Link to="..."> / <NavLink to="..."> / navigate(...) targets missing from routes.tsx.
 func (e *IntegrationExecutor) verifyNavigationAndHandlers(routesContent string) []IntegrationIssue {
 	declaredRoutes, hasRoutes := collectDeclaredRoutes(routesContent)
 	var issues []IntegrationIssue
+
+	// Pass 1: Read all relevant TSX/JSX files so we can collect every declared section `id="..."`
+	fileContents := make(map[string]string)
+	var orderedFiles []string
+
+	appTsxPath := filepath.Join(e.workspacePath, "src", "App.tsx")
+	if raw, err := os.ReadFile(appTsxPath); err == nil {
+		fileContents["src/App.tsx"] = string(raw)
+		orderedFiles = append(orderedFiles, "src/App.tsx")
+	}
 
 	scanDirs := []string{"src/pages", "src/components"}
 	for _, relDir := range scanDirs {
@@ -542,61 +831,93 @@ func (e *IntegrationExecutor) verifyNavigationAndHandlers(routesContent string) 
 			if readErr != nil {
 				return nil
 			}
-			content := string(raw)
+			fileContents[normRel] = string(raw)
+			orderedFiles = append(orderedFiles, normRel)
+			return nil
+		})
+	}
 
-			if badAnchors := findLeadingSlashAnchorHrefs(content); len(badAnchors) > 0 {
-				issues = append(issues, IntegrationIssue{
-					File:    normRel,
-					Issue:   "broken_preview_link",
-					Details: fmt.Sprintf("Found leading-slash `<a href=\"%s\">`, which escapes the app preview base path (`/preview/:id/`). Replace with React Router `<Link to=\"...\">` for routes or `#sectionId` smooth scroll for in-page links.", strings.Join(badAnchors, ", ")),
-				})
-			}
+	declaredIDs := collectDeclaredSectionIDs(fileContents)
 
-			if deadAnchors := findUnhandledDeadAnchors(content); len(deadAnchors) > 0 {
-				issues = append(issues, IntegrationIssue{
-					File:    normRel,
-					Issue:   "dead_link",
-					Details: "Contains placeholder `<a href=\"#\">` (or empty href) without an interactive handler. Wire it to a real route via `<Link to=\"...\">`, an existing `#sectionId`, or an `onClick` handler.",
-				})
-			}
+	// Pass 2: Audit every file for dead buttons/CTAs, dead forms, broken links, and missing routes/anchors
+	for _, normRel := range orderedFiles {
+		content := fileContents[normRel]
+		if strings.Contains(content, "Welcome to Your Website") {
+			continue
+		}
 
-			if noopOnClickRe.MatchString(content) {
-				issues = append(issues, IntegrationIssue{
-					File:    normRel,
-					Issue:   "noop_handler",
-					Details: "Contains empty no-op `onClick={() => {}}` handler. Wire every button and interactive control to real state updates, navigation, modals, or toast feedback.",
-				})
-			}
+		if badAnchors := findLeadingSlashAnchorHrefs(content); len(badAnchors) > 0 {
+			issues = append(issues, IntegrationIssue{
+				File:    normRel,
+				Issue:   "broken_preview_link",
+				Details: fmt.Sprintf("Found leading-slash link/redirect (`%s`), which escapes the app preview base path (`/preview/:id/`). Replace with React Router `<Link to=\"...\">` / `navigate('...')` for routes or `#sectionId` smooth scroll for in-page links.", strings.Join(badAnchors, ", ")),
+			})
+		}
 
-			if hasRoutes {
-				seenMissing := make(map[string]bool)
-				for _, re := range []*regexp.Regexp{linkToRe, navigateCallRe} {
-					for _, m := range re.FindAllStringSubmatch(content, -1) {
-						if len(m) < 2 {
-							continue
-						}
-						target := strings.TrimSpace(m[1])
-						if target == "" || strings.HasPrefix(target, "/api/") || strings.HasPrefix(target, "/storage/") || strings.HasPrefix(target, "/files/") {
-							continue
-						}
-						if !matchesDeclaredRoute(target, declaredRoutes) && !seenMissing[target] {
-							seenMissing[target] = true
-							issues = append(issues, IntegrationIssue{
-								File:    normRel,
-								Issue:   "missing_route",
-								Details: fmt.Sprintf("Navigation target `%s` is not declared in `src/routes.tsx`. Either add `{ path: '%s', element: <... />, ... }` to `src/routes.tsx` or point the link to a valid registered route.", target, target),
-							})
-						}
+		if deadAnchors := findUnhandledDeadAnchors(content); len(deadAnchors) > 0 {
+			issues = append(issues, IntegrationIssue{
+				File:    normRel,
+				Issue:   "dead_link",
+				Details: "Contains placeholder `<a href=\"#\">`, `javascript:...`, or empty `<Link to=\"\">` without an interactive handler. Wire every menu/footer link to a registered route via `<Link to=\"...\">`, an existing `#sectionId`, or a working `onClick` handler.",
+			})
+		}
+
+		if missingAnchors := findMissingSectionAnchors(content, declaredIDs); len(missingAnchors) > 0 {
+			issues = append(issues, IntegrationIssue{
+				File:    normRel,
+				Issue:   "missing_section_id",
+				Details: fmt.Sprintf("In-page anchor/scroll target(s) %s do not match any element `id=\"...\"` in the app. Add the matching `id=\"...\"` attribute to the target section or point the menu link/CTA to an existing section or `<Link to=\"...\">` route.", strings.Join(missingAnchors, ", ")),
+			})
+		}
+
+		if noopOnClickRe.MatchString(content) {
+			issues = append(issues, IntegrationIssue{
+				File:    normRel,
+				Issue:   "noop_handler",
+				Details: "Contains empty or console-only `onClick`/`onSubmit` handler. Wire every button, CTA, and form to real state updates, navigation, modals/dialogs, or `toast.success(...)` feedback.",
+			})
+		}
+
+		if deadButtons := findDeadButtons(content); len(deadButtons) > 0 {
+			issues = append(issues, IntegrationIssue{
+				File:    normRel,
+				Issue:   "dead_button",
+				Details: fmt.Sprintf("Found non-functional button/CTA(s) without `onClick`, `type=\"submit\"`, `asChild`, or trigger wrapper: %s. Wire every button and CTA to perform a real action (route `<Link to=\"...\">` via `asChild`, `navigate(...)`, open a dialog/modal/drawer, scroll to an existing `#sectionId`, or update interactive state).", strings.Join(deadButtons, ", ")),
+			})
+		}
+
+		if findDeadForms(content) {
+			issues = append(issues, IntegrationIssue{
+				File:    normRel,
+				Issue:   "dead_form",
+				Details: "Found `<form>` without an `onSubmit` handler. Add an `onSubmit={(e) => { e.preventDefault(); ... }}` handler that validates input, updates state/database, and shows `toast.success(...)` confirmation.",
+			})
+		}
+
+		if hasRoutes {
+			seenMissing := make(map[string]bool)
+			for _, re := range []*regexp.Regexp{linkToRe, navigateCallRe} {
+				for _, m := range re.FindAllStringSubmatch(content, -1) {
+					if len(m) < 2 {
+						continue
+					}
+					target := strings.TrimSpace(m[1])
+					if target == "" || strings.HasPrefix(target, "/api/") || strings.HasPrefix(target, "/storage/") || strings.HasPrefix(target, "/files/") {
+						continue
+					}
+					if !matchesDeclaredRoute(target, declaredRoutes) && !seenMissing[target] {
+						seenMissing[target] = true
+						issues = append(issues, IntegrationIssue{
+							File:    normRel,
+							Issue:   "missing_route",
+							Details: fmt.Sprintf("Navigation target `%s` is not declared in `src/routes.tsx`. Either add `{ path: '%s', element: <... />, ... }` to `src/routes.tsx` or point the menu link/CTA to a valid registered route.", target, target),
+						})
 					}
 				}
 			}
+		}
 
-			if len(issues) >= 12 {
-				return filepath.SkipAll
-			}
-			return nil
-		})
-		if len(issues) >= 12 {
+		if len(issues) >= 15 {
 			break
 		}
 	}

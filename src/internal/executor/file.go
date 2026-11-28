@@ -180,11 +180,17 @@ func validateContentQuality(content string, filePath string) []string {
 		if badLinks := findLeadingSlashAnchorHrefs(content); len(badLinks) > 0 {
 			warnings = append(warnings, fmt.Sprintf("Uses leading-slash `<a href=\"%s\">` which breaks `/preview/:id/` routing; replace with React Router `<Link to=\"...\">` or `#section` smooth scroll.", badLinks[0]))
 		}
-		if deadHashAnchorRe.MatchString(content) {
-			warnings = append(warnings, "Contains dead placeholder `<a href=\"#\">` link; wire it to a real `#sectionId` anchor, `<Link to=\"...\">`, or interactive button handler.")
+		if deadLinks := findUnhandledDeadAnchors(content); len(deadLinks) > 0 {
+			warnings = append(warnings, "Contains dead placeholder `<a href=\"#\">`, `javascript:...`, or empty `<Link>` without a handler; wire every menu/footer link to a registered route, existing `#sectionId`, or working `onClick`.")
 		}
 		if noopOnClickRe.MatchString(content) {
-			warnings = append(warnings, "Contains empty no-op `onClick={() => {}}` handler; every button must trigger real state updates, navigation, or a modal/toast.")
+			warnings = append(warnings, "Contains empty or console-only `onClick`/`onSubmit` handler; every button and CTA must trigger real state updates, navigation, or a modal/toast.")
+		}
+		if deadBtns := findDeadButtons(content); len(deadBtns) > 0 {
+			warnings = append(warnings, fmt.Sprintf("Found non-functional button/CTA(s) with no onClick, type=\"submit\", asChild, or trigger wrapper (%s). Wire every button and CTA to perform a real action!", strings.Join(deadBtns, ", ")))
+		}
+		if findDeadForms(content) {
+			warnings = append(warnings, "Contains `<form>` without an `onSubmit` handler; wire `onSubmit={(e) => { e.preventDefault(); ... }}` with real state/toast feedback.")
 		}
 	}
 
@@ -402,6 +408,11 @@ func (e *FileExecutor) EditFile(ctx context.Context, args map[string]interface{}
 	// Check for missing imports (non-blocking warnings)
 	if warnings := validateImports(fullPath, e.workspacePath); len(warnings) > 0 {
 		result += "\n\n⚠️ Import warnings:\n" + strings.Join(warnings, "\n")
+	}
+
+	// Check for dead buttons, CTAs, forms, or broken links immediately on edit
+	if warnings := validateContentQuality(newContent, path); len(warnings) > 0 {
+		result += "\n\n⚠️ Content warnings:\n" + strings.Join(warnings, "\n")
 	}
 
 	return &ToolResult{

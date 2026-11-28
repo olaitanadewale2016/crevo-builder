@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode"
 
+	"crevo-builder/internal/executor"
 	"crevo-builder/internal/models"
 	"crevo-builder/internal/registry"
 )
@@ -378,8 +379,13 @@ func buildWorkspaceReferenceSection(cfg PromptConfig) string {
 	var sb strings.Builder
 	sb.WriteString("\n## Workspace Reference (Pre-Loaded — DO NOT readFile Boilerplate)\n\n")
 
-	// 1. Starter-placeholder detection
-	if workspaceExists && isStarterPlaceholderHome(cfg.WorkspacePath) {
+	// 1. Starter-placeholder vs existing customized app detection
+	isExistingApp := workspaceExists && executor.WorkspaceHasCustomizedApp(cfg.WorkspacePath)
+	if isExistingApp {
+		if pres := BuildExistingAppPreservationSection(cfg.WorkspacePath, cfg.Goal); pres != "" {
+			sb.WriteString(pres)
+		}
+	} else if workspaceExists && isStarterPlaceholderHome(cfg.WorkspacePath) {
 		sb.WriteString("**Workspace Status:** Fresh starter workspace: `src/pages/Home.tsx` is an empty placeholder — DO NOT read it; overwrite it directly in Turn 1.\n")
 	}
 
@@ -486,12 +492,15 @@ func buildWorkspaceReferenceSection(cfg PromptConfig) string {
 		}
 	}
 
-	// 8. Pre-selected domain stock images (local registry lookup, 0ms, zero HTTP)
-	if images := preselectDomainStockImages(cfg.Goal); len(images) > 0 {
-		sb.WriteString("\n**Pre-Selected Domain Stock Images (verified & ready for Turn 1 — no need to call `listImages` unless you want more; NEVER reuse a URL across two slots):**\n")
-		for _, img := range images {
-			url := registry.FormatImageURL(img, "")
-			fmt.Fprintf(&sb, "- `[%s | %s | %s/%s]`: %s\n", img.Type, img.Subject, img.Tone, img.Contrast, url)
+	// 8. Pre-selected domain stock images (only on fresh builds or when user explicitly asks for new images/sections/redesign)
+	editIntent := ClassifyEditIntent(cfg.Goal)
+	if !isExistingApp || editIntent.WantsImageChanges || editIntent.WantsFullRedesign {
+		if images := preselectDomainStockImages(cfg.Goal); len(images) > 0 {
+			sb.WriteString("\n**Pre-Selected Domain Stock Images (verified & ready for Turn 1 — no need to call `listImages` unless you want more; NEVER reuse a URL across two slots):**\n")
+			for _, img := range images {
+				url := registry.FormatImageURL(img, "")
+				fmt.Fprintf(&sb, "- `[%s | %s | %s/%s]`: %s\n", img.Type, img.Subject, img.Tone, img.Contrast, url)
+			}
 		}
 	}
 

@@ -89,9 +89,9 @@ func WriteFilesTool() models.ToolDefinition {
 		Name: "writeFiles",
 		Description: `Create or overwrite multiple files in a single tool call. Parent directories are created automatically.
 
-Best for: Initial website builds — write src/custom.css, modular components/data files, src/pages/Home.tsx, additional pages, and src/routes.tsx together in Turn 1.
-Do NOT write protected system files (src/index.css, index.html, src/main.tsx, package.json, vite.config.ts, tsconfig.json, template.json).
-For small surgical changes to an existing customized file, use editFile instead.`,
+Best for: Initial V1 builds OR creating brand-new files/pages.
+CRITICAL ON EXISTING BUILT APPS: Do NOT use writeFiles to overwrite existing customized pages, header/navbar/logo components, or src/custom.css unless the user explicitly asked for a full redesign. Read target files with readFiles and use editFile for surgical updates so the existing logo and UI remain intact.
+Do NOT write protected system files (src/index.css, index.html, src/main.tsx, package.json, vite.config.ts, tsconfig.json, template.json).`,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -150,8 +150,8 @@ func CreateFileTool() models.ToolDefinition {
 Key behaviors:
 - Parent directories are created automatically.
 - Prefer writeFiles when creating 2+ files in the same turn.
-- Best for: NEW files, fresh starter Home.tsx replacement, or complete rewrites when editFile would require too many changes (>20 lines).
-- WARNING: When the user asks for a small change (button fix, color change, text update) on an already-customized file, use editFile instead so existing design is preserved.
+- Best for: NEW files or replacing the fresh starter Home.tsx on V1 initial builds.
+- CRITICAL ON EXISTING BUILT APPS: NEVER overwrite an existing customized file (especially header/navbar/logo components, src/custom.css, or Home.tsx) without reading it first, and ALWAYS prefer editFile for targeted changes so the existing logo, theme, and untouched UI are preserved.
 
 Returns: success confirmation with byte count and any import/content warnings.`,
 		Parameters: map[string]interface{}{

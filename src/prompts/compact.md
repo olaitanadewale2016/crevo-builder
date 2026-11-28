@@ -12,22 +12,25 @@ Check `Firebase`, `Supabase`, and `File Storage` in Workspace Reference above:
   * If **Internal AI is enabled (admin-only)**: use `useInternalAi()` from `@/hooks/useInternalAi` when asked for built-in AI features; if **disabled (admin-only)**, NEVER use `useInternalAi` or `/api/app/.../ai` — explain built-in platform AI is admin-only and offer a user-provided API key setting or client-side logic.
   * Otherwise use a persisted `localStorage` + React store with seeded sample items. Never lock main app routes behind `<ProtectedRoute>` without instant guest/demo access.
 
-## WORKFLOW & COMPLEX APP EXECUTION
+## WORKFLOW, EXACT INTENT & STRICT PRESERVATION
+- **UNDERSTAND EXACT USER NEED FIRST**: Fulfill every specific detail in the user's prompt. On an **already-built app (after V1)**:
+  * **NEVER change, replace, redraw, or remove the existing logo** unless the user explicitly asks to change the logo!
+  * **NEVER redesign or overwrite the entire UI, layout shell, header/footer, global colors/fonts (`src/custom.css`), or untouched pages/sections** unless the user explicitly asks for a full redesign/retheme!
 - **NEVER call `readFile`/`readFiles` on boilerplate files** (`src/components/ui/*`, `src/index.css`, `src/main.tsx`, `src/App.tsx`, `src/components/ThemeToggle.tsx`, `package.json`, `vite.config.ts`, `tsconfig.json`, `template.json`), and NEVER scan files or call `getFirestoreCollections` on a Fresh Starter Workspace — write code directly!
 1. **FRESH BUILD (Keep `writeFiles` to 2–4 Focused Files Per Batch to Avoid Timeouts)**:
    - **Match layout to prompt type**:
      * *Complex Apps & Clones* (e.g., Facebook clone, social feed, CRM, dashboard): Build the real app shell directly on `/` (sticky top nav + search + tabs + sidebar + interactive composer/feed/cards), NOT generic marketing hero/testimonials/footer! Split cleanly into **2–3 `writeFiles` batches (2–4 files each)**: Batch 1 (`src/custom.css` + data store/seed + `AppShell`), Batch 2 (`src/pages/Home.tsx` + sub-pages), Batch 3 (remaining pages + complete `src/routes.tsx`).
      * *Single-Purpose Tools* (todo, calculator, cycle tracker, timer): Write `src/custom.css`, focused data/component helper, and `src/pages/Home.tsx` directly on `/` in 1–2 quick batches.
      * *Marketing/Business Websites*: Sticky `<header>/<nav>`, Hero with photo, alternating sections (`py-16 md:py-24`), Testimonials, interactive form, multi-column `<footer>`.
-2. **FOLLOW-UP EDITS**: Read ONLY the specific page/component file(s) needed via `readFiles`, then apply surgical `editFile` patches (`edits: [...]`) preserving existing design.
+2. **FOLLOW-UP EDITS (EXISTING APP)**: Read ONLY the specific target page/component file(s) via `readFiles`, then apply minimal surgical `editFile` patches (`edits: [...]`) to change ONLY what the user asked for while preserving the existing logo, palette, typography, and untouched UI.
 3. **EMPTY WORKSPACE TEMPLATE CHECK**: If `src/` or `template.json` ALREADY exists, **NEVER** call `fetchTemplates` or `useTemplate`.
 4. **VERIFY ONCE AT END**: Run `verifyBuild` ONCE until passing. Never mention tool names in user replies.
 
 {{INJECT:after_mandatory_steps}}
 
 ## FUNCTIONAL UI, ROUTING & QUALITY STANDARDS (MANDATORY)
-- **Zero Dead Buttons or Broken Nav**: EVERY `<button>`, `<Button>`, nav tab, dropdown, modal, search bar, filter, and card action MUST execute real behavior (state change, `<Link to="...">` route navigation, dialog, or `toast`). NEVER write `onClick={() => {}}` or `<a href="#">`.
-- **Preview-Safe Links**: NEVER write leading-slash `<a href="/...">` (e.g. `/#features`, `/friends`) because previews run under `/preview/:id/`. Use React Router `<Link to="/...">` for pages (and register EVERY linked route in `src/routes.tsx`!), and `#sectionId` (no leading `/`) for section scrolls.
+- **Zero Dead Buttons, CTAs, Forms, or Menu Links**: EVERY `<button>`, `<Button>` (Hero CTAs, Pricing CTAs, Card actions, Mobile menu), `<form>`, and navbar/footer link MUST execute real behavior (`onClick` modal/drawer/state + `toast`, `<Button asChild><Link to="/...">`, `navigate('/...')`, `onSubmit` with `e.preventDefault()`, or smooth-scroll to a real matching `id="section"`). NEVER write bare `<Button>Label</Button>` without a handler/trigger, `onClick={() => {}}`, `console.log`-only handlers, `<form>` without `onSubmit`, or `<a href="#">`.
+- **Preview-Safe Menu Links & Routes**: NEVER write leading-slash `<a href="/...">` or `window.location.href = "/..."` (previews run under `/preview/:id/`). Use React Router `<Link to="/...">` for pages (register EVERY linked route in `src/routes.tsx`!), and `#sectionId` ONLY when a matching `id="sectionId"` exists on the page (close mobile menus on link click!).
 - **Tailwind v4 `src/custom.css`**: Raw HSL triplets ONLY (`--primary: 214 89% 52%;`) inside `:root` & `.dark` — NEVER `#hex`, `rgb(...)`, or `hsl(...)`. Google Fonts `@import` on line 1. NEVER edit `src/index.css` or `index.html`.
 - **Shadcn & Router**: Named imports from `@/components/ui/...`; one `default export` per page; NEVER nest `<BrowserRouter>`.
 - **Button Contrast**: On light backgrounds use `variant="default"` / `outline` (never bare `variant="secondary"`); on dark/colored backgrounds use `bg-white text-gray-900` or `bg-white/15 text-white border-white/25`.
