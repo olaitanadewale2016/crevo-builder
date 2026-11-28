@@ -329,7 +329,7 @@ func buildCapabilitiesSection(caps *models.ProjectCapabilities) string {
 	}
 	var sb strings.Builder
 	if caps.Firebase != nil && caps.Firebase.Enabled {
-		fmt.Fprintf(&sb, "## FIREBASE: Enabled (prefix: %s). Use `useFirestore` / `useData` / `useAuth` when user wants Firebase persistence.\n\n", caps.Firebase.CollectionPrefix)
+		fmt.Fprintf(&sb, "## FIREBASE: Enabled (prefix: %s). Use `useAuth` for login/signup, `useUserFirestore` for private per-user collections (`users/<uid>/<col>`), `useFirestoreDoc('users', user?.uid)` for user profiles/settings, `useFirestore`/`useData` for shared collections, and `useFirebaseStorage` for Firebase file uploads. Sort in JS instead of combining `where()` + `orderBy()`.\n\n", caps.Firebase.CollectionPrefix)
 	}
 	if caps.Supabase != nil && caps.Supabase.Enabled {
 		fmt.Fprintf(&sb, "## SUPABASE: Connected (url: %s, table prefix: %s). Use `window.__APP_CONFIG__.supabase` when user wants Supabase PostgreSQL/Auth.\n\n", caps.Supabase.URL, caps.Supabase.TablePrefix)
@@ -337,7 +337,7 @@ func buildCapabilitiesSection(caps *models.ProjectCapabilities) string {
 		sb.WriteString("## SUPABASE: Available on plan (not yet connected in Settings -> Database).\n\n")
 	}
 	if caps.Storage != nil && caps.Storage.Enabled {
-		fmt.Fprintf(&sb, "## STORAGE: Enabled. Max %dMB.\n\n", caps.Storage.MaxFileSizeMB)
+		fmt.Fprintf(&sb, "## STORAGE: Enabled (max %dMB). Use `useSystemStorage` from `@/hooks/useSystemStorage` for file uploads.\n\n", caps.Storage.MaxFileSizeMB)
 	}
 	return sb.String()
 }
@@ -371,10 +371,15 @@ func buildWorkspaceReferenceSection(cfg PromptConfig) string {
 		sb.WriteString("**Workspace Status:** Fresh starter workspace: `src/pages/Home.tsx` is an empty placeholder — DO NOT read it; overwrite it directly in Turn 1.\n")
 	}
 
-	// 2. Inline Project Capabilities summary
+	// 2. Inline Project Capabilities summary + active usage hints
 	sb.WriteString("**Project Capabilities:** ")
 	sb.WriteString(formatCapabilitiesSummary(cfg.Capabilities))
 	sb.WriteString("\n")
+	if capDetails := strings.TrimSpace(buildCapabilitiesSection(cfg.Capabilities)); capDetails != "" {
+		sb.WriteString("\n")
+		sb.WriteString(capDetails)
+		sb.WriteString("\n")
+	}
 
 	// 3. Template Metadata (pages, file structure, custom components, styling)
 	meta := cfg.TemplateMetadata

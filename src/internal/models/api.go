@@ -181,11 +181,12 @@ type SuggestionsResponse struct {
 
 // ChatRequest is the request body for POST /api/chat/:session_id
 type ChatRequest struct {
-	Message        string            `json:"message" binding:"required"`
-	History        []HistoryMessage  `json:"history"`
-	IsCompacted    bool              `json:"is_compacted"` // Skip summarization if history is already compacted
-	Config         *RequestConfig    `json:"config,omitempty"`
-	AttachedImages []ImageAttachment `json:"attached_images,omitempty"`
+	Message             string               `json:"message" binding:"required"`
+	History             []HistoryMessage     `json:"history"`
+	IsCompacted         bool                 `json:"is_compacted"` // Skip summarization if history is already compacted
+	Config              *RequestConfig       `json:"config,omitempty"`
+	ProjectCapabilities *ProjectCapabilities `json:"project_capabilities,omitempty"`
+	AttachedImages      []ImageAttachment    `json:"attached_images,omitempty"`
 }
 
 // ErrorResponse is returned for errors

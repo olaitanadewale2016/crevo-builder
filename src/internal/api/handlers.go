@@ -1115,6 +1115,16 @@ func (s *Server) handleChat(c *gin.Context) {
 		session.SetConfig(req.Config)
 	}
 
+	// Refresh project capabilities if provided so newly configured Firebase/Storage/Supabase applies immediately
+	if req.ProjectCapabilities != nil {
+		session.SetProjectCapabilities(*req.ProjectCapabilities)
+		s.logger.WithFields(logrus.Fields{
+			"session_id":       session.ID,
+			"firebase_enabled": req.ProjectCapabilities.Firebase != nil && req.ProjectCapabilities.Firebase.Enabled,
+			"storage_enabled":  req.ProjectCapabilities.Storage != nil && req.ProjectCapabilities.Storage.Enabled,
+		}).Debug("Project capabilities refreshed on chat turn")
+	}
+
 	// Reinitialize streamer for the new conversation turn using stored server key
 	webhookNotifier := webhook.NewNotifier(
 		session.GetWebhookURL(),
